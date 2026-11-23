@@ -1156,6 +1156,7 @@ export function createDocxThumbnailRenderer(
 export {
   DocxEditorViewer,
   type DocxEditorController,
+  type DocxTableCellSelectionRange,
   type DocxDocumentTheme,
   type DocxFormFieldLocation,
   type DocxSelectedFormField,

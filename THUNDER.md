@@ -49,6 +49,6 @@ after (the application's tasks name them).
 | | change | files |
 | --- | --- | --- |
 | — | release script and this file | `scripts/thunder-release.sh`, `THUNDER.md` |
+| 1 | controller exposes `applyModelChange` (one undoable step) and the viewer's selected cell block (`tableCellSelection`, reported by `DocxEditorViewer` through `reportTableCellSelection`); `DocxTableCellSelectionRange` exported | `react-viewer/src/editor.tsx`, `index.tsx`, `tests/unit/thunder-controller-api.test.ts` |
 
-Nothing in the editor itself is changed yet: `v0.15.2-thunder.0` is upstream
-0.15.2 as built here.
+`v0.15.2-thunder.0` is upstream 0.15.2 as built here.
