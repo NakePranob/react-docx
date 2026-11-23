@@ -39819,6 +39819,10 @@ export function DocxEditorViewer({
         startX: number;
         startY: number;
         isSelectingCells: boolean;
+        /** THUNDER: began on a cell's text, which the browser selects until the drag leaves the cell. */
+        fromText?: boolean;
+        /** THUNDER: the viewer's user-select before a from-text drag turned into a cell selection. */
+        restoreUserSelect?: string;
         isSelectingAcrossNodes: boolean;
       }
     | undefined
@@ -47722,7 +47726,8 @@ export function DocxEditorViewer({
       anchorCell: DocxTableCellLocation,
       startX: number,
       startY: number,
-      startBoundary?: DocxTextRangeBoundary
+      startBoundary?: DocxTextRangeBoundary,
+      fromText?: boolean
     ): void => {
       tableCellSelectionDragRef.current = {
         pointerId,
@@ -47732,6 +47737,7 @@ export function DocxEditorViewer({
         startY,
         isSelectingCells: false,
         isSelectingAcrossNodes: false,
+        fromText,
       };
 
       const onPointerMove = (pointerMoveEvent: PointerEvent): void => {
@@ -47794,6 +47800,16 @@ export function DocxEditorViewer({
             const selection = window.getSelection();
             selection?.removeAllRanges();
             focusTableCellSelection();
+            // THUNDER: the browser is still extending its text selection
+            // under this drag; stop it until the pointer is released.
+            const root = viewerRootRef.current;
+            if (dragState.fromText && root) {
+              dragState.restoreUserSelect = root.style.userSelect;
+              root.style.userSelect = "none";
+            }
+          }
+          if (dragState.fromText) {
+            window.getSelection()?.removeAllRanges();
           }
 
           setTableCellSelectionRange({
@@ -47813,7 +47829,9 @@ export function DocxEditorViewer({
           return;
         }
 
-        if (!dragState.startBoundary) {
+        if (!dragState.startBoundary || dragState.fromText) {
+          // THUNDER: a drag from a cell's text that has not left the table's
+          // cells stays the browser's text selection.
           return;
         }
 
@@ -47844,6 +47862,9 @@ export function DocxEditorViewer({
 
         if (dragState.isSelectingCells || dragState.isSelectingAcrossNodes) {
           suppressNextTableCellClickRef.current = true;
+        }
+        if (dragState.restoreUserSelect !== undefined && viewerRootRef.current) {
+          viewerRootRef.current.style.userSelect = dragState.restoreUserSelect;
         }
 
         tableCellSelectionDragRef.current = undefined;
@@ -54723,6 +54744,22 @@ export function DocxEditorViewer({
           event.preventDefault();
           event.stopPropagation();
           handlePointerSelection(event);
+          // THUNDER: a paragraph in a table cell selects its text until the
+          // drag reaches another cell, then the cells — as Word does. The
+          // cell's own handler never sees this pointerdown (stopped above).
+          const cellLocation = parseTableCellLocationFromElement(
+            target instanceof Element ? target : null
+          );
+          if (cellLocation) {
+            beginTableCellSelectionDrag(
+              event.pointerId,
+              cellLocation,
+              event.clientX,
+              event.clientY,
+              undefined,
+              true
+            );
+          }
         }}
         onContextMenu={(event) => {
           const target = event.target;
@@ -54810,6 +54847,10 @@ export function DocxEditorViewer({
             dragState.pointerId !== event.pointerId ||
             dragState.locationKey !== locationKey
           ) {
+            return;
+          }
+          // THUNDER: the drag has become a cell selection; stop selecting text.
+          if (tableCellSelectionDragRef.current?.isSelectingCells) {
             return;
           }
           const fallbackBias: "start" | "end" =
@@ -62393,6 +62434,20 @@ export function DocxEditorViewer({
                                 if (pointerInsideEditableCell) {
                                   // Preserve native caret placement and text drag behavior.
                                   pendingTableCellFocusRef.current = undefined;
+                                  // THUNDER: …until the drag reaches another cell,
+                                  // when it selects cells, as Word does. Without this
+                                  // a table with no cell padding has nowhere to start
+                                  // a cell selection from.
+                                  if (event.button === 0 || event.button === undefined) {
+                                    beginTableCellSelectionDrag(
+                                      event.pointerId,
+                                      { tableIndex: nodeIndex, rowIndex, cellIndex },
+                                      event.clientX,
+                                      event.clientY,
+                                      undefined,
+                                      true
+                                    );
+                                  }
                                   return;
                                 }
 
@@ -62512,6 +62567,21 @@ export function DocxEditorViewer({
                                 };
                               }}
                             >
+                              {/* THUNDER: a block of selected cells is drawn; upstream tracks it but never shows it. */}
+                              {selectedByRange && isMultiCellSelectionActive ? (
+                                <div
+                                  aria-hidden="true"
+                                  data-docx-thumbnail-exclude="true"
+                                  data-thunder-cell-selected="true"
+                                  style={{
+                                    position: "absolute",
+                                    inset: 0,
+                                    background: "rgba(37, 99, 235, 0.16)",
+                                    pointerEvents: "none",
+                                    zIndex: 1,
+                                  }}
+                                />
+                              ) : null}
                               {hasMergedPageFragment && (!editableCell || mergeAnchor !== undefined) ? (
                                 <div data-docx-merged-fragment="true" style={resolveMergedTableCellFragmentClipStyle({
                                   table: node,
