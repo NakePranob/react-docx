@@ -36763,9 +36763,7 @@ function tableUsesSeparateBorderModel(table) {
   if (tableBorderVisible(tableBorders?.insideH) || tableBorderVisible(tableBorders?.insideV)) {
     return false;
   }
-  return table.rows.some(
-    (row) => row.cells.some((cell) => tableBorderSetHasVisibleEdges(cell.style?.borders))
-  );
+  return false;
 }
 function resolveTableSeparateBorderSpacingPx(table) {
   const explicitCellSpacingPx = twipsToPixels(table.style?.cellSpacingTwips);
@@ -43825,8 +43823,20 @@ function useDocxEditor(options = {}) {
     [applyModelChange]
   );
   tableGridResizeCommitByController.set(syncPaginationInfo, commitTableGridGeometry);
+  const [tableCellSelection, setTableCellSelection] = React9.useState();
+  const reportTableCellSelection = React9.useCallback(
+    (range) => {
+      setTableCellSelection(
+        (current) => sameTableCellSelectionRange(current, range) ? current : range
+      );
+    },
+    []
+  );
   const controller = {
     model,
+    applyModelChange,
+    tableCellSelection,
+    reportTableCellSelection,
     documentLoadNonce,
     historyRevision,
     fileName,
@@ -46856,6 +46866,10 @@ function DocxEditorViewer({
   const tableMoveDragRef = React9.useRef(void 0);
   const suppressNextTableCellClickRef = React9.useRef(false);
   const [tableCellSelectionRange, setTableCellSelectionRange] = React9.useState();
+  const reportTableCellSelection = editor.reportTableCellSelection;
+  React9.useEffect(() => {
+    reportTableCellSelection?.(tableCellSelectionRange);
+  }, [reportTableCellSelection, tableCellSelectionRange]);
   const [tableMoveDropPreview, setTableMoveDropPreview] = React9.useState();
   const [objectWrapDragPreview, setObjectWrapDragPreview] = React9.useState();
   const objectDragCleanupRef = React9.useRef(void 0);
@@ -52694,7 +52708,7 @@ function DocxEditorViewer({
     []
   );
   const beginTableCellSelectionDrag = React9.useCallback(
-    (pointerId, anchorCell, startX, startY, startBoundary) => {
+    (pointerId, anchorCell, startX, startY, startBoundary, fromText) => {
       tableCellSelectionDragRef.current = {
         pointerId,
         anchorCell,
@@ -52702,7 +52716,8 @@ function DocxEditorViewer({
         startX,
         startY,
         isSelectingCells: false,
-        isSelectingAcrossNodes: false
+        isSelectingAcrossNodes: false,
+        fromText
       };
       const onPointerMove = (pointerMoveEvent) => {
         const dragState = tableCellSelectionDragRef.current;
@@ -52748,6 +52763,14 @@ function DocxEditorViewer({
             const selection = window.getSelection();
             selection?.removeAllRanges();
             focusTableCellSelection();
+            const root = viewerRootRef.current;
+            if (dragState.fromText && root) {
+              dragState.restoreUserSelect = root.style.userSelect;
+              root.style.userSelect = "none";
+            }
+          }
+          if (dragState.fromText) {
+            window.getSelection()?.removeAllRanges();
           }
           setTableCellSelectionRange({
             tableIndex: dragState.anchorCell.tableIndex,
@@ -52765,7 +52788,7 @@ function DocxEditorViewer({
           pointerMoveEvent.preventDefault();
           return;
         }
-        if (!dragState.startBoundary) {
+        if (!dragState.startBoundary || dragState.fromText) {
           return;
         }
         const endBoundary = resolveBoundaryFromPoint(
@@ -52792,6 +52815,9 @@ function DocxEditorViewer({
         }
         if (dragState.isSelectingCells || dragState.isSelectingAcrossNodes) {
           suppressNextTableCellClickRef.current = true;
+        }
+        if (dragState.restoreUserSelect !== void 0 && viewerRootRef.current) {
+          viewerRootRef.current.style.userSelect = dragState.restoreUserSelect;
         }
         tableCellSelectionDragRef.current = void 0;
         window.removeEventListener("pointermove", onPointerMove);
@@ -58168,6 +58194,19 @@ function DocxEditorViewer({
           event.preventDefault();
           event.stopPropagation();
           handlePointerSelection(event);
+          const cellLocation = parseTableCellLocationFromElement(
+            target instanceof Element ? target : null
+          );
+          if (cellLocation) {
+            beginTableCellSelectionDrag(
+              event.pointerId,
+              cellLocation,
+              event.clientX,
+              event.clientY,
+              void 0,
+              true
+            );
+          }
         },
         onContextMenu: (event) => {
           const target = event.target;
@@ -58231,6 +58270,9 @@ function DocxEditorViewer({
         onPointerMove: (event) => {
           const dragState = wrappedParagraphSelectionDragRef.current;
           if (!dragState || dragState.pointerId !== event.pointerId || dragState.locationKey !== locationKey) {
+            return;
+          }
+          if (tableCellSelectionDragRef.current?.isSelectingCells) {
             return;
           }
           const fallbackBias = event.clientY < dragState.startY || event.clientY === dragState.startY && event.clientX < dragState.startX ? "start" : "end";
@@ -63939,7 +63981,7 @@ ${currentText.slice(end)}`;
                                 }
                               );
                             };
-                            return /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(
+                            return /* @__PURE__ */ (0, import_jsx_runtime6.jsxs)(
                               "td",
                               {
                                 "data-docx-source-id": node.blockId ? `${node.blockId}/row/${rowIndex}/cell/${cellIndex}` : void 0,
@@ -64162,6 +64204,16 @@ ${currentText.slice(end)}`;
                                   );
                                   if (pointerInsideEditableCell) {
                                     pendingTableCellFocusRef.current = void 0;
+                                    if (event.button === 0 || event.button === void 0) {
+                                      beginTableCellSelectionDrag(
+                                        event.pointerId,
+                                        { tableIndex: nodeIndex, rowIndex, cellIndex },
+                                        event.clientX,
+                                        event.clientY,
+                                        void 0,
+                                        true
+                                      );
+                                    }
                                     return;
                                   }
                                   const targetIsNestedTableParagraphEditor = eventTargetIsNestedTableParagraphEditor(
@@ -64237,358 +64289,324 @@ ${currentText.slice(end)}`;
                                     paragraphIndex: pendingFocusParagraphIndex
                                   };
                                 },
-                                children: hasMergedPageFragment && (!editableCell || mergeAnchor !== void 0) ? /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { "data-docx-merged-fragment": "true", style: resolveMergedTableCellFragmentClipStyle({
-                                  table: node,
-                                  sourceCell: mergeSourceCell,
-                                  sourceStart: mergeSourceRow,
-                                  sourceEnd: mergeEnd,
-                                  fragmentStart: rowIndex,
-                                  fragmentEnd: rowIndex + rowSpanValue,
-                                  fragmentHeightPx: mergedFragmentHeight,
-                                  paddingTopPx: cellPaddingPx.top,
-                                  paddingBottomPx: cellPaddingPx.bottom
-                                }), children: /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { style: {
-                                  transform: `translateY(-${sumRowHeights(mergeSourceRow, rowIndex)}px)`,
-                                  height: mergedContentHeight,
-                                  display: "flex",
-                                  flexDirection: "column",
-                                  justifyContent: mergeSourceCell.style?.verticalAlign === "center" ? "center" : mergeSourceCell.style?.verticalAlign === "bottom" ? "flex-end" : "flex-start"
-                                }, children: /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { style: {
-                                  display: "grid",
-                                  gap: 0,
-                                  ...tableCellTextDirectionCss(mergeSourceCell, mergedContentHeight)
-                                }, children: mergeSourceCell.nodes.map((content, contentIndex) => content.type === "paragraph" ? /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { style: tableCellParagraphBlockStyle(
-                                  content,
-                                  editor.model.metadata.numberingDefinitions,
-                                  headingStyles,
-                                  contentIndex,
-                                  applyWordTableDefaults,
-                                  nodeDocGridLinePitchPx,
-                                  typography,
-                                  { first: contentIndex === 0, last: contentIndex === mergeSourceCell.nodes.length - 1 }
-                                ), children: renderInteractiveParagraphRuns(
-                                  content,
-                                  `merged-${nodeIndex}-${rowIndex}-${cellIndex}-${contentIndex}`,
-                                  {
-                                    kind: "table-cell",
-                                    tableIndex: nodeIndex,
-                                    rowIndex: mergeSourceRow,
-                                    cellIndex: mergeAnchor?.cellIndex ?? cellIndex,
-                                    paragraphIndex: contentIndex
-                                  },
-                                  { pageIndex: options?.pageIndex }
-                                ) }, contentIndex) : renderHeaderNode(
-                                  content,
-                                  `merged-table-${nodeIndex}-${rowIndex}-${cellIndex}-${contentIndex}`,
-                                  documentContentTheme,
-                                  editor.model.metadata.numberingDefinitions,
-                                  headingStyles,
-                                  cellContentWidthPx,
-                                  void 0,
-                                  void 0,
-                                  void 0,
-                                  tablePageNumber,
-                                  tableTotalPages,
-                                  tableRunRenderOptions,
-                                  void 0,
-                                  void 0,
-                                  void 0,
-                                  void 0,
-                                  void 0,
-                                  void 0,
-                                  void 0,
-                                  typography
-                                )) }) }) }) : editableCell ? /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(
-                                  "div",
-                                  {
-                                    contentEditable: true,
-                                    suppressContentEditableWarning: true,
-                                    "data-docx-cell-key": cellElementKey,
-                                    style: {
-                                      minHeight: 0,
-                                      outline: "none",
-                                      padding: 0,
-                                      borderRadius: 0,
-                                      display: "grid",
-                                      // Must match the read-mode cell wrapper (gap 0):
-                                      // a different gap shifts paragraphs between the
-                                      // read->edit DOM swap and breaks point-based
-                                      // caret placement from the original click.
-                                      gap: 0,
-                                      whiteSpace: "pre-wrap",
-                                      wordWrap: "break-word",
-                                      overflowWrap: "break-word",
-                                      wordBreak: "break-word",
-                                      ...tableCellTextDirectionCss(cell, mergedFragmentHeight)
+                                children: [
+                                  selectedByRange && isMultiCellSelectionActive ? /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(
+                                    "div",
+                                    {
+                                      "aria-hidden": "true",
+                                      "data-docx-thumbnail-exclude": "true",
+                                      "data-thunder-cell-selected": "true",
+                                      style: {
+                                        position: "absolute",
+                                        inset: 0,
+                                        background: "rgba(37, 99, 235, 0.16)",
+                                        pointerEvents: "none",
+                                        zIndex: 1
+                                      }
+                                    }
+                                  ) : null,
+                                  hasMergedPageFragment && (!editableCell || mergeAnchor !== void 0) ? /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { "data-docx-merged-fragment": "true", style: resolveMergedTableCellFragmentClipStyle({
+                                    table: node,
+                                    sourceCell: mergeSourceCell,
+                                    sourceStart: mergeSourceRow,
+                                    sourceEnd: mergeEnd,
+                                    fragmentStart: rowIndex,
+                                    fragmentEnd: rowIndex + rowSpanValue,
+                                    fragmentHeightPx: mergedFragmentHeight,
+                                    paddingTopPx: cellPaddingPx.top,
+                                    paddingBottomPx: cellPaddingPx.bottom
+                                  }), children: /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { style: {
+                                    transform: `translateY(-${sumRowHeights(mergeSourceRow, rowIndex)}px)`,
+                                    height: mergedContentHeight,
+                                    display: "flex",
+                                    flexDirection: "column",
+                                    justifyContent: mergeSourceCell.style?.verticalAlign === "center" ? "center" : mergeSourceCell.style?.verticalAlign === "bottom" ? "flex-end" : "flex-start"
+                                  }, children: /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { style: {
+                                    display: "grid",
+                                    gap: 0,
+                                    ...tableCellTextDirectionCss(mergeSourceCell, mergedContentHeight)
+                                  }, children: mergeSourceCell.nodes.map((content, contentIndex) => content.type === "paragraph" ? /* @__PURE__ */ (0, import_jsx_runtime6.jsx)("div", { style: tableCellParagraphBlockStyle(
+                                    content,
+                                    editor.model.metadata.numberingDefinitions,
+                                    headingStyles,
+                                    contentIndex,
+                                    applyWordTableDefaults,
+                                    nodeDocGridLinePitchPx,
+                                    typography,
+                                    { first: contentIndex === 0, last: contentIndex === mergeSourceCell.nodes.length - 1 }
+                                  ), children: renderInteractiveParagraphRuns(
+                                    content,
+                                    `merged-${nodeIndex}-${rowIndex}-${cellIndex}-${contentIndex}`,
+                                    {
+                                      kind: "table-cell",
+                                      tableIndex: nodeIndex,
+                                      rowIndex: mergeSourceRow,
+                                      cellIndex: mergeAnchor?.cellIndex ?? cellIndex,
+                                      paragraphIndex: contentIndex
                                     },
-                                    dangerouslySetInnerHTML: renderedEditableCellHtml ? stableInnerHtmlProp(
-                                      editableTableCellHtmlPropsRef.current,
-                                      cellDraftKey,
-                                      renderedEditableCellHtml
-                                    ) : void 0,
-                                    ref: (element) => {
-                                      if (element) {
-                                        tableCellEditorElementsRef.current.set(
-                                          cellDraftKey,
-                                          element
-                                        );
-                                      } else {
-                                        tableCellEditorElementsRef.current.delete(
-                                          cellDraftKey
-                                        );
-                                      }
-                                      if (!element || !editableCell) {
-                                        return;
-                                      }
-                                      const draft = tableCellDraftsRef.current.get(
-                                        cellDraftKey
-                                      );
-                                      if (!compositionActiveRef.current && typeof draft === "string") {
-                                        const draftHtml = draft;
-                                        scheduleDomWrite(() => {
-                                          if (!element.isConnected || compositionActiveRef.current) {
-                                            return;
-                                          }
-                                          const latestDraft = tableCellDraftsRef.current.get(
+                                    { pageIndex: options?.pageIndex }
+                                  ) }, contentIndex) : renderHeaderNode(
+                                    content,
+                                    `merged-table-${nodeIndex}-${rowIndex}-${cellIndex}-${contentIndex}`,
+                                    documentContentTheme,
+                                    editor.model.metadata.numberingDefinitions,
+                                    headingStyles,
+                                    cellContentWidthPx,
+                                    void 0,
+                                    void 0,
+                                    void 0,
+                                    tablePageNumber,
+                                    tableTotalPages,
+                                    tableRunRenderOptions,
+                                    void 0,
+                                    void 0,
+                                    void 0,
+                                    void 0,
+                                    void 0,
+                                    void 0,
+                                    void 0,
+                                    typography
+                                  )) }) }) }) : editableCell ? /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(
+                                    "div",
+                                    {
+                                      contentEditable: true,
+                                      suppressContentEditableWarning: true,
+                                      "data-docx-cell-key": cellElementKey,
+                                      style: {
+                                        minHeight: 0,
+                                        outline: "none",
+                                        padding: 0,
+                                        borderRadius: 0,
+                                        display: "grid",
+                                        // Must match the read-mode cell wrapper (gap 0):
+                                        // a different gap shifts paragraphs between the
+                                        // read->edit DOM swap and breaks point-based
+                                        // caret placement from the original click.
+                                        gap: 0,
+                                        whiteSpace: "pre-wrap",
+                                        wordWrap: "break-word",
+                                        overflowWrap: "break-word",
+                                        wordBreak: "break-word",
+                                        ...tableCellTextDirectionCss(cell, mergedFragmentHeight)
+                                      },
+                                      dangerouslySetInnerHTML: renderedEditableCellHtml ? stableInnerHtmlProp(
+                                        editableTableCellHtmlPropsRef.current,
+                                        cellDraftKey,
+                                        renderedEditableCellHtml
+                                      ) : void 0,
+                                      ref: (element) => {
+                                        if (element) {
+                                          tableCellEditorElementsRef.current.set(
+                                            cellDraftKey,
+                                            element
+                                          );
+                                        } else {
+                                          tableCellEditorElementsRef.current.delete(
                                             cellDraftKey
                                           );
-                                          if (latestDraft !== draftHtml) {
-                                            return;
-                                          }
-                                          if (element.innerHTML !== draftHtml) {
-                                            const activeElement = document.activeElement;
-                                            const shouldRestoreSelection = activeElement === element || activeElement instanceof Element && element.contains(activeElement);
-                                            const selectionOffsets = shouldRestoreSelection ? selectionOffsetsWithinElement(
-                                              element
-                                            ) : void 0;
-                                            element.innerHTML = draftHtml;
-                                            if (shouldRestoreSelection) {
-                                              if (selectionOffsets) {
-                                                const textLength = editableTextFromTableCellElement(
-                                                  element
-                                                ).length;
-                                                const safeStart = Math.max(
-                                                  0,
-                                                  Math.min(
-                                                    selectionOffsets.start,
-                                                    textLength
-                                                  )
-                                                );
-                                                const safeEnd = Math.max(
-                                                  safeStart,
-                                                  Math.min(
-                                                    selectionOffsets.end,
-                                                    textLength
-                                                  )
-                                                );
-                                                setSelectionWithinElementByTextOffsets(
-                                                  element,
-                                                  safeStart,
-                                                  safeEnd
-                                                );
-                                              } else {
-                                                placeCaretInsideElement(element);
-                                              }
+                                        }
+                                        if (!element || !editableCell) {
+                                          return;
+                                        }
+                                        const draft = tableCellDraftsRef.current.get(
+                                          cellDraftKey
+                                        );
+                                        if (!compositionActiveRef.current && typeof draft === "string") {
+                                          const draftHtml = draft;
+                                          scheduleDomWrite(() => {
+                                            if (!element.isConnected || compositionActiveRef.current) {
+                                              return;
                                             }
-                                          }
-                                          const latestTableNode = editor.model.nodes[nodeIndex];
-                                          if (!latestTableNode || latestTableNode.type !== "table") {
-                                            return;
-                                          }
-                                          const latestCell = latestTableNode.rows[rowIndex]?.cells[cellIndex];
-                                          if (!latestCell) {
-                                            return;
-                                          }
-                                          if (editableTextFromTableCellElement(
-                                            element
-                                          ) === tableCellText(
-                                            tableCellParagraphs(
-                                              latestCell.nodes
-                                            )
-                                          )) {
-                                            tableCellDraftsRef.current.delete(
+                                            const latestDraft = tableCellDraftsRef.current.get(
                                               cellDraftKey
                                             );
-                                          }
-                                        });
-                                      }
-                                      const pendingFocus = pendingTableCellFocusRef.current;
-                                      if (pendingFocus?.cellElementKey === cellElementKey) {
-                                        if (pendingFocus.point) {
-                                          const rect = element.getBoundingClientRect();
-                                          const pointInsideElement = pendingFocus.point.x >= rect.left && pendingFocus.point.x <= rect.right && pendingFocus.point.y >= rect.top && pendingFocus.point.y <= rect.bottom;
-                                          if (!pointInsideElement) {
-                                            return;
-                                          }
+                                            if (latestDraft !== draftHtml) {
+                                              return;
+                                            }
+                                            if (element.innerHTML !== draftHtml) {
+                                              const activeElement = document.activeElement;
+                                              const shouldRestoreSelection = activeElement === element || activeElement instanceof Element && element.contains(activeElement);
+                                              const selectionOffsets = shouldRestoreSelection ? selectionOffsetsWithinElement(
+                                                element
+                                              ) : void 0;
+                                              element.innerHTML = draftHtml;
+                                              if (shouldRestoreSelection) {
+                                                if (selectionOffsets) {
+                                                  const textLength = editableTextFromTableCellElement(
+                                                    element
+                                                  ).length;
+                                                  const safeStart = Math.max(
+                                                    0,
+                                                    Math.min(
+                                                      selectionOffsets.start,
+                                                      textLength
+                                                    )
+                                                  );
+                                                  const safeEnd = Math.max(
+                                                    safeStart,
+                                                    Math.min(
+                                                      selectionOffsets.end,
+                                                      textLength
+                                                    )
+                                                  );
+                                                  setSelectionWithinElementByTextOffsets(
+                                                    element,
+                                                    safeStart,
+                                                    safeEnd
+                                                  );
+                                                } else {
+                                                  placeCaretInsideElement(element);
+                                                }
+                                              }
+                                            }
+                                            const latestTableNode = editor.model.nodes[nodeIndex];
+                                            if (!latestTableNode || latestTableNode.type !== "table") {
+                                              return;
+                                            }
+                                            const latestCell = latestTableNode.rows[rowIndex]?.cells[cellIndex];
+                                            if (!latestCell) {
+                                              return;
+                                            }
+                                            if (editableTextFromTableCellElement(
+                                              element
+                                            ) === tableCellText(
+                                              tableCellParagraphs(
+                                                latestCell.nodes
+                                              )
+                                            )) {
+                                              tableCellDraftsRef.current.delete(
+                                                cellDraftKey
+                                              );
+                                            }
+                                          });
                                         }
-                                        const applyPendingFocus = () => {
-                                          const latestPendingFocus = pendingTableCellFocusRef.current;
-                                          if (!latestPendingFocus || latestPendingFocus.cellElementKey !== cellElementKey || !element.isConnected) {
-                                            return;
+                                        const pendingFocus = pendingTableCellFocusRef.current;
+                                        if (pendingFocus?.cellElementKey === cellElementKey) {
+                                          if (pendingFocus.point) {
+                                            const rect = element.getBoundingClientRect();
+                                            const pointInsideElement = pendingFocus.point.x >= rect.left && pendingFocus.point.x <= rect.right && pendingFocus.point.y >= rect.top && pendingFocus.point.y <= rect.bottom;
+                                            if (!pointInsideElement) {
+                                              return;
+                                            }
                                           }
-                                          element.focus({ preventScroll: true });
-                                          const boundary = latestPendingFocus.boundary;
-                                          const boundaryInCurrentCell = Boolean(
-                                            boundary && boundary.location.kind === "table-cell" && boundary.location.tableIndex === nodeIndex && boundary.location.rowIndex === rowIndex && boundary.location.cellIndex === cellIndex
-                                          );
-                                          const paragraphElementForFocus = Number.isFinite(
-                                            latestPendingFocus.paragraphIndex
-                                          ) ? element.querySelector(
-                                            `[data-docx-paragraph-kind='table-cell'][data-docx-table-index='${nodeIndex}'][data-docx-row-index='${rowIndex}'][data-docx-cell-index='${cellIndex}'][data-docx-table-paragraph-index='${latestPendingFocus.paragraphIndex}']`
-                                          ) ?? void 0 : void 0;
-                                          const paragraphSelector = `[data-docx-paragraph-kind='table-cell'][data-docx-table-index='${nodeIndex}'][data-docx-row-index='${rowIndex}'][data-docx-cell-index='${cellIndex}'][data-docx-table-paragraph-index]`;
-                                          const paragraphElements = Array.from(
-                                            element.querySelectorAll(
+                                          const applyPendingFocus = () => {
+                                            const latestPendingFocus = pendingTableCellFocusRef.current;
+                                            if (!latestPendingFocus || latestPendingFocus.cellElementKey !== cellElementKey || !element.isConnected) {
+                                              return;
+                                            }
+                                            element.focus({ preventScroll: true });
+                                            const boundary = latestPendingFocus.boundary;
+                                            const boundaryInCurrentCell = Boolean(
+                                              boundary && boundary.location.kind === "table-cell" && boundary.location.tableIndex === nodeIndex && boundary.location.rowIndex === rowIndex && boundary.location.cellIndex === cellIndex
+                                            );
+                                            const paragraphElementForFocus = Number.isFinite(
+                                              latestPendingFocus.paragraphIndex
+                                            ) ? element.querySelector(
+                                              `[data-docx-paragraph-kind='table-cell'][data-docx-table-index='${nodeIndex}'][data-docx-row-index='${rowIndex}'][data-docx-cell-index='${cellIndex}'][data-docx-table-paragraph-index='${latestPendingFocus.paragraphIndex}']`
+                                            ) ?? void 0 : void 0;
+                                            const paragraphSelector = `[data-docx-paragraph-kind='table-cell'][data-docx-table-index='${nodeIndex}'][data-docx-row-index='${rowIndex}'][data-docx-cell-index='${cellIndex}'][data-docx-table-paragraph-index]`;
+                                            const paragraphElements = Array.from(
+                                              element.querySelectorAll(
+                                                paragraphSelector
+                                              )
+                                            );
+                                            const paragraphElementAtPoint = latestPendingFocus.point ? document.elementFromPoint(
+                                              latestPendingFocus.point.x,
+                                              latestPendingFocus.point.y
+                                            )?.closest(
                                               paragraphSelector
-                                            )
-                                          );
-                                          const paragraphElementAtPoint = latestPendingFocus.point ? document.elementFromPoint(
-                                            latestPendingFocus.point.x,
-                                            latestPendingFocus.point.y
-                                          )?.closest(
-                                            paragraphSelector
-                                          ) ?? void 0 : void 0;
-                                          const paragraphElementByPoint = latestPendingFocus.point && paragraphElements.length > 0 ? paragraphElements.reduce(
-                                            (closest, candidate) => {
-                                              const closestRect = closest.getBoundingClientRect();
-                                              const candidateRect = candidate.getBoundingClientRect();
-                                              const closestDistance = Math.abs(
-                                                latestPendingFocus.point.y - (closestRect.top + closestRect.height / 2)
+                                            ) ?? void 0 : void 0;
+                                            const paragraphElementByPoint = latestPendingFocus.point && paragraphElements.length > 0 ? paragraphElements.reduce(
+                                              (closest, candidate) => {
+                                                const closestRect = closest.getBoundingClientRect();
+                                                const candidateRect = candidate.getBoundingClientRect();
+                                                const closestDistance = Math.abs(
+                                                  latestPendingFocus.point.y - (closestRect.top + closestRect.height / 2)
+                                                );
+                                                const candidateDistance = Math.abs(
+                                                  latestPendingFocus.point.y - (candidateRect.top + candidateRect.height / 2)
+                                                );
+                                                return candidateDistance < closestDistance ? candidate : closest;
+                                              },
+                                              paragraphElements[0]
+                                            ) : void 0;
+                                            const paragraphElement = paragraphElementForFocus ?? paragraphElementAtPoint ?? paragraphElementByPoint;
+                                            if (boundaryInCurrentCell && boundary) {
+                                              setSelectionFromDocxBoundaries(
+                                                boundary,
+                                                boundary
                                               );
-                                              const candidateDistance = Math.abs(
-                                                latestPendingFocus.point.y - (candidateRect.top + candidateRect.height / 2)
+                                            } else if (paragraphElement) {
+                                              placeCaretInsideElement(
+                                                paragraphElement,
+                                                latestPendingFocus.point
                                               );
-                                              return candidateDistance < closestDistance ? candidate : closest;
-                                            },
-                                            paragraphElements[0]
-                                          ) : void 0;
-                                          const paragraphElement = paragraphElementForFocus ?? paragraphElementAtPoint ?? paragraphElementByPoint;
-                                          if (boundaryInCurrentCell && boundary) {
-                                            setSelectionFromDocxBoundaries(
-                                              boundary,
-                                              boundary
-                                            );
-                                          } else if (paragraphElement) {
-                                            placeCaretInsideElement(
-                                              paragraphElement,
-                                              latestPendingFocus.point
-                                            );
-                                          } else if (latestPendingFocus.point) {
-                                            placeCaretInsideElement(
+                                            } else if (latestPendingFocus.point) {
+                                              placeCaretInsideElement(
+                                                element,
+                                                latestPendingFocus.point
+                                              );
+                                            } else {
+                                              placeCaretInsideElement(element);
+                                            }
+                                            updateActiveTextRangeFromTableCell(
                                               element,
-                                              latestPendingFocus.point
+                                              nodeIndex,
+                                              rowIndex,
+                                              cellIndex
                                             );
-                                          } else {
-                                            placeCaretInsideElement(element);
-                                          }
-                                          updateActiveTextRangeFromTableCell(
-                                            element,
-                                            nodeIndex,
-                                            rowIndex,
-                                            cellIndex
+                                            pendingTableCellFocusRef.current = void 0;
+                                          };
+                                          applyPendingFocus();
+                                        }
+                                      },
+                                      onInput: (event) => {
+                                        cancelPendingPointerSelectionReconcile();
+                                        const nativeInputEvent = event.nativeEvent;
+                                        if (nativeInputEvent?.isComposing || compositionActiveRef.current) {
+                                          editor.beginSelectionSession(
+                                            "composition"
                                           );
-                                          pendingTableCellFocusRef.current = void 0;
-                                        };
-                                        applyPendingFocus();
-                                      }
-                                    },
-                                    onInput: (event) => {
-                                      cancelPendingPointerSelectionReconcile();
-                                      const nativeInputEvent = event.nativeEvent;
-                                      if (nativeInputEvent?.isComposing || compositionActiveRef.current) {
-                                        editor.beginSelectionSession(
-                                          "composition"
+                                          return;
+                                        }
+                                        if (cellUsesLegacyDraftEditing) {
+                                          editor.beginSelectionSession("keyboard", {
+                                            settleAfterMs: 220
+                                          });
+                                          schedulePaginationMeasurementResume();
+                                          tableCellDraftsRef.current.set(
+                                            cellDraftKey,
+                                            event.currentTarget.innerHTML
+                                          );
+                                          requestTableDraftLayoutRefresh();
+                                          return;
+                                        }
+                                        const context = activeTableCellParagraphContext(
+                                          event.currentTarget
                                         );
-                                        return;
-                                      }
-                                      if (cellUsesLegacyDraftEditing) {
+                                        const contextParagraph = context ? cellParagraphs[context.paragraphIndex] : void 0;
+                                        if (!context || !contextParagraph) {
+                                          return;
+                                        }
+                                        const domText = editableTextFromElement(
+                                          context.paragraphElement
+                                        );
+                                        if (domText === paragraphText2(contextParagraph)) {
+                                          return;
+                                        }
+                                        const continuationKey = `c:${nodeIndex}:${rowIndex}:${cellIndex}:${context.paragraphIndex}`;
+                                        const continuation = editingIntentContinuationRef.current;
+                                        if (continuation && continuation.key === continuationKey && continuation.text !== domText) {
+                                          return;
+                                        }
                                         editor.beginSelectionSession("keyboard", {
                                           settleAfterMs: 220
                                         });
                                         schedulePaginationMeasurementResume();
-                                        tableCellDraftsRef.current.set(
-                                          cellDraftKey,
-                                          event.currentTarget.innerHTML
-                                        );
-                                        requestTableDraftLayoutRefresh();
-                                        return;
-                                      }
-                                      const context = activeTableCellParagraphContext(
-                                        event.currentTarget
-                                      );
-                                      const contextParagraph = context ? cellParagraphs[context.paragraphIndex] : void 0;
-                                      if (!context || !contextParagraph) {
-                                        return;
-                                      }
-                                      const domText = editableTextFromElement(
-                                        context.paragraphElement
-                                      );
-                                      if (domText === paragraphText2(contextParagraph)) {
-                                        return;
-                                      }
-                                      const continuationKey = `c:${nodeIndex}:${rowIndex}:${cellIndex}:${context.paragraphIndex}`;
-                                      const continuation = editingIntentContinuationRef.current;
-                                      if (continuation && continuation.key === continuationKey && continuation.text !== domText) {
-                                        return;
-                                      }
-                                      editor.beginSelectionSession("keyboard", {
-                                        settleAfterMs: 220
-                                      });
-                                      schedulePaginationMeasurementResume();
-                                      const typedOffsets = selectionOffsetsWithinElement(
-                                        context.paragraphElement
-                                      );
-                                      const caretOffset = typedOffsets?.end ?? domText.length;
-                                      editor.commitParagraphTextAtRange(
-                                        {
-                                          kind: "table-cell",
-                                          tableIndex: nodeIndex,
-                                          rowIndex,
-                                          cellIndex,
-                                          paragraphIndex: context.paragraphIndex
-                                        },
-                                        domText,
-                                        {
-                                          start: typedOffsets?.start ?? caretOffset,
-                                          end: caretOffset
-                                        }
-                                      );
-                                      editingIntentContinuationRef.current = {
-                                        key: continuationKey,
-                                        text: domText,
-                                        caret: caretOffset
-                                      };
-                                    },
-                                    onCompositionStart: () => {
-                                      cancelPendingPointerSelectionReconcile();
-                                      compositionActiveRef.current = true;
-                                      editor.beginSelectionSession("composition");
-                                    },
-                                    onCompositionEnd: (event) => {
-                                      compositionActiveRef.current = false;
-                                      editor.beginSelectionSession("keyboard", {
-                                        settleAfterMs: 260
-                                      });
-                                      schedulePaginationMeasurementResume();
-                                      if (cellUsesLegacyDraftEditing) {
-                                        tableCellDraftsRef.current.set(
-                                          cellDraftKey,
-                                          event.currentTarget.innerHTML
-                                        );
-                                        requestTableDraftLayoutRefresh();
-                                        return;
-                                      }
-                                      const context = activeTableCellParagraphContext(
-                                        event.currentTarget
-                                      );
-                                      if (context && cellParagraphs[context.paragraphIndex]) {
-                                        const composedText = editableTextFromElement(
+                                        const typedOffsets = selectionOffsetsWithinElement(
                                           context.paragraphElement
                                         );
-                                        const composedOffsets = selectionOffsetsWithinElement(
-                                          context.paragraphElement
-                                        );
-                                        const caretEnd = composedOffsets?.end ?? composedText.length;
+                                        const caretOffset = typedOffsets?.end ?? domText.length;
                                         editor.commitParagraphTextAtRange(
                                           {
                                             kind: "table-cell",
@@ -64597,61 +64615,195 @@ ${currentText.slice(end)}`;
                                             cellIndex,
                                             paragraphIndex: context.paragraphIndex
                                           },
-                                          composedText,
+                                          domText,
                                           {
-                                            start: composedOffsets?.start ?? caretEnd,
-                                            end: caretEnd
+                                            start: typedOffsets?.start ?? caretOffset,
+                                            end: caretOffset
                                           }
                                         );
                                         editingIntentContinuationRef.current = {
-                                          key: `c:${nodeIndex}:${rowIndex}:${cellIndex}:${context.paragraphIndex}`,
-                                          text: composedText,
-                                          caret: caretEnd
+                                          key: continuationKey,
+                                          text: domText,
+                                          caret: caretOffset
                                         };
-                                        return;
-                                      }
-                                      editor.commitTableCellText(
-                                        nodeIndex,
-                                        rowIndex,
-                                        cellIndex,
-                                        editableTextFromTableCellElement(
-                                          event.currentTarget
-                                        )
-                                      );
-                                    },
-                                    onClick: (event) => {
-                                      if (eventTargetIsInteractiveControl(
-                                        event.target
-                                      )) {
-                                        return;
-                                      }
-                                      if (eventTargetIsNestedTableParagraphEditor(
-                                        event.target
-                                      )) {
-                                        return;
-                                      }
-                                      if (event.detail > 1) {
-                                        return;
-                                      }
-                                      const cellElement = event.currentTarget;
-                                      const paragraphSelector = `[data-docx-paragraph-kind='table-cell'][data-docx-table-index='${nodeIndex}'][data-docx-row-index='${rowIndex}'][data-docx-cell-index='${cellIndex}'][data-docx-table-paragraph-index]`;
-                                      const clickTargetElement = event.target instanceof Element ? event.target : event.target instanceof Node ? event.target.parentElement : null;
-                                      const clickedParagraph = clickTargetElement ? clickTargetElement.closest(
-                                        paragraphSelector
-                                      ) ?? void 0 : void 0;
-                                      const fallbackParagraph = (() => {
-                                        if (clickedParagraph) {
-                                          return clickedParagraph;
+                                      },
+                                      onCompositionStart: () => {
+                                        cancelPendingPointerSelectionReconcile();
+                                        compositionActiveRef.current = true;
+                                        editor.beginSelectionSession("composition");
+                                      },
+                                      onCompositionEnd: (event) => {
+                                        compositionActiveRef.current = false;
+                                        editor.beginSelectionSession("keyboard", {
+                                          settleAfterMs: 260
+                                        });
+                                        schedulePaginationMeasurementResume();
+                                        if (cellUsesLegacyDraftEditing) {
+                                          tableCellDraftsRef.current.set(
+                                            cellDraftKey,
+                                            event.currentTarget.innerHTML
+                                          );
+                                          requestTableDraftLayoutRefresh();
+                                          return;
                                         }
-                                        const paragraphs2 = Array.from(
+                                        const context = activeTableCellParagraphContext(
+                                          event.currentTarget
+                                        );
+                                        if (context && cellParagraphs[context.paragraphIndex]) {
+                                          const composedText = editableTextFromElement(
+                                            context.paragraphElement
+                                          );
+                                          const composedOffsets = selectionOffsetsWithinElement(
+                                            context.paragraphElement
+                                          );
+                                          const caretEnd = composedOffsets?.end ?? composedText.length;
+                                          editor.commitParagraphTextAtRange(
+                                            {
+                                              kind: "table-cell",
+                                              tableIndex: nodeIndex,
+                                              rowIndex,
+                                              cellIndex,
+                                              paragraphIndex: context.paragraphIndex
+                                            },
+                                            composedText,
+                                            {
+                                              start: composedOffsets?.start ?? caretEnd,
+                                              end: caretEnd
+                                            }
+                                          );
+                                          editingIntentContinuationRef.current = {
+                                            key: `c:${nodeIndex}:${rowIndex}:${cellIndex}:${context.paragraphIndex}`,
+                                            text: composedText,
+                                            caret: caretEnd
+                                          };
+                                          return;
+                                        }
+                                        editor.commitTableCellText(
+                                          nodeIndex,
+                                          rowIndex,
+                                          cellIndex,
+                                          editableTextFromTableCellElement(
+                                            event.currentTarget
+                                          )
+                                        );
+                                      },
+                                      onClick: (event) => {
+                                        if (eventTargetIsInteractiveControl(
+                                          event.target
+                                        )) {
+                                          return;
+                                        }
+                                        if (eventTargetIsNestedTableParagraphEditor(
+                                          event.target
+                                        )) {
+                                          return;
+                                        }
+                                        if (event.detail > 1) {
+                                          return;
+                                        }
+                                        const cellElement = event.currentTarget;
+                                        const paragraphSelector = `[data-docx-paragraph-kind='table-cell'][data-docx-table-index='${nodeIndex}'][data-docx-row-index='${rowIndex}'][data-docx-cell-index='${cellIndex}'][data-docx-table-paragraph-index]`;
+                                        const clickTargetElement = event.target instanceof Element ? event.target : event.target instanceof Node ? event.target.parentElement : null;
+                                        const clickedParagraph = clickTargetElement ? clickTargetElement.closest(
+                                          paragraphSelector
+                                        ) ?? void 0 : void 0;
+                                        const fallbackParagraph = (() => {
+                                          if (clickedParagraph) {
+                                            return clickedParagraph;
+                                          }
+                                          const paragraphs2 = Array.from(
+                                            event.currentTarget.querySelectorAll(
+                                              paragraphSelector
+                                            )
+                                          );
+                                          if (paragraphs2.length === 0) {
+                                            return void 0;
+                                          }
+                                          return paragraphs2.reduce(
+                                            (closest, candidate) => {
+                                              const closestRect = closest.getBoundingClientRect();
+                                              const candidateRect = candidate.getBoundingClientRect();
+                                              const closestDistance = Math.abs(
+                                                event.clientY - (closestRect.top + closestRect.height / 2)
+                                              );
+                                              const candidateDistance = Math.abs(
+                                                event.clientY - (candidateRect.top + candidateRect.height / 2)
+                                              );
+                                              return candidateDistance < closestDistance ? candidate : closest;
+                                            },
+                                            paragraphs2[0]
+                                          );
+                                        })();
+                                        if (fallbackParagraph) {
+                                          schedulePointerSelectionReconcile(
+                                            fallbackParagraph,
+                                            {
+                                              x: event.clientX,
+                                              y: event.clientY
+                                            },
+                                            () => {
+                                              updateActiveTextRangeFromTableCell(
+                                                cellElement,
+                                                nodeIndex,
+                                                rowIndex,
+                                                cellIndex
+                                              );
+                                            }
+                                          );
+                                        }
+                                      },
+                                      onDoubleClick: (event) => {
+                                        const cellElement = event.currentTarget;
+                                        const paragraphSelector = `[data-docx-paragraph-kind='table-cell'][data-docx-table-index='${nodeIndex}'][data-docx-row-index='${rowIndex}'][data-docx-cell-index='${cellIndex}'][data-docx-table-paragraph-index]`;
+                                        const targetElement = event.target instanceof Element ? event.target : event.target instanceof Node ? event.target.parentElement : null;
+                                        const paragraphElement = targetElement?.closest(
+                                          paragraphSelector
+                                        ) ?? void 0;
+                                        if (!paragraphElement) {
+                                          return;
+                                        }
+                                        schedulePointerSelectionReconcile(
+                                          paragraphElement,
+                                          {
+                                            x: event.clientX,
+                                            y: event.clientY
+                                          },
+                                          () => {
+                                            updateActiveTextRangeFromTableCell(
+                                              cellElement,
+                                              nodeIndex,
+                                              rowIndex,
+                                              cellIndex
+                                            );
+                                          }
+                                        );
+                                      },
+                                      onPaste: (event) => {
+                                        const pastedText = event.clipboardData.getData("text/plain");
+                                        if (!pastedText) {
+                                          return;
+                                        }
+                                        const replaced = replaceExpandedSelectionWithText(
+                                          pastedText
+                                        );
+                                        if (!replaced) {
+                                          return;
+                                        }
+                                        event.preventDefault();
+                                        event.stopPropagation();
+                                        tableCellDraftsRef.current.delete(
+                                          cellDraftKey
+                                        );
+                                      },
+                                      onMouseUp: (event) => {
+                                        const cellElement = event.currentTarget;
+                                        const paragraphSelector = `[data-docx-paragraph-kind='table-cell'][data-docx-table-index='${nodeIndex}'][data-docx-row-index='${rowIndex}'][data-docx-cell-index='${cellIndex}'][data-docx-table-paragraph-index]`;
+                                        const paragraphElements = Array.from(
                                           event.currentTarget.querySelectorAll(
                                             paragraphSelector
                                           )
                                         );
-                                        if (paragraphs2.length === 0) {
-                                          return void 0;
-                                        }
-                                        return paragraphs2.reduce(
+                                        const fallbackParagraph = paragraphElements.length > 0 ? paragraphElements.reduce(
                                           (closest, candidate) => {
                                             const closestRect = closest.getBoundingClientRect();
                                             const candidateRect = candidate.getBoundingClientRect();
@@ -64663,154 +64815,290 @@ ${currentText.slice(end)}`;
                                             );
                                             return candidateDistance < closestDistance ? candidate : closest;
                                           },
-                                          paragraphs2[0]
-                                        );
-                                      })();
-                                      if (fallbackParagraph) {
-                                        schedulePointerSelectionReconcile(
-                                          fallbackParagraph,
-                                          {
-                                            x: event.clientX,
-                                            y: event.clientY
-                                          },
-                                          () => {
-                                            updateActiveTextRangeFromTableCell(
-                                              cellElement,
-                                              nodeIndex,
-                                              rowIndex,
-                                              cellIndex
-                                            );
-                                          }
-                                        );
-                                      }
-                                    },
-                                    onDoubleClick: (event) => {
-                                      const cellElement = event.currentTarget;
-                                      const paragraphSelector = `[data-docx-paragraph-kind='table-cell'][data-docx-table-index='${nodeIndex}'][data-docx-row-index='${rowIndex}'][data-docx-cell-index='${cellIndex}'][data-docx-table-paragraph-index]`;
-                                      const targetElement = event.target instanceof Element ? event.target : event.target instanceof Node ? event.target.parentElement : null;
-                                      const paragraphElement = targetElement?.closest(
-                                        paragraphSelector
-                                      ) ?? void 0;
-                                      if (!paragraphElement) {
-                                        return;
-                                      }
-                                      schedulePointerSelectionReconcile(
-                                        paragraphElement,
-                                        {
-                                          x: event.clientX,
-                                          y: event.clientY
-                                        },
-                                        () => {
+                                          paragraphElements[0]
+                                        ) : void 0;
+                                        if (fallbackParagraph && selectionIsExpandedWithinElement(
+                                          fallbackParagraph
+                                        )) {
                                           updateActiveTextRangeFromTableCell(
                                             cellElement,
                                             nodeIndex,
                                             rowIndex,
                                             cellIndex
                                           );
+                                          cancelPendingPointerSelectionReconcile();
+                                          return;
                                         }
-                                      );
-                                    },
-                                    onPaste: (event) => {
-                                      const pastedText = event.clipboardData.getData("text/plain");
-                                      if (!pastedText) {
-                                        return;
-                                      }
-                                      const replaced = replaceExpandedSelectionWithText(
-                                        pastedText
-                                      );
-                                      if (!replaced) {
-                                        return;
-                                      }
-                                      event.preventDefault();
-                                      event.stopPropagation();
-                                      tableCellDraftsRef.current.delete(
-                                        cellDraftKey
-                                      );
-                                    },
-                                    onMouseUp: (event) => {
-                                      const cellElement = event.currentTarget;
-                                      const paragraphSelector = `[data-docx-paragraph-kind='table-cell'][data-docx-table-index='${nodeIndex}'][data-docx-row-index='${rowIndex}'][data-docx-cell-index='${cellIndex}'][data-docx-table-paragraph-index]`;
-                                      const paragraphElements = Array.from(
-                                        event.currentTarget.querySelectorAll(
-                                          paragraphSelector
-                                        )
-                                      );
-                                      const fallbackParagraph = paragraphElements.length > 0 ? paragraphElements.reduce(
-                                        (closest, candidate) => {
-                                          const closestRect = closest.getBoundingClientRect();
-                                          const candidateRect = candidate.getBoundingClientRect();
-                                          const closestDistance = Math.abs(
-                                            event.clientY - (closestRect.top + closestRect.height / 2)
+                                        if (fallbackParagraph) {
+                                          schedulePointerSelectionReconcile(
+                                            fallbackParagraph,
+                                            {
+                                              x: event.clientX,
+                                              y: event.clientY
+                                            },
+                                            () => {
+                                              updateActiveTextRangeFromTableCell(
+                                                cellElement,
+                                                nodeIndex,
+                                                rowIndex,
+                                                cellIndex
+                                              );
+                                            }
                                           );
-                                          const candidateDistance = Math.abs(
-                                            event.clientY - (candidateRect.top + candidateRect.height / 2)
-                                          );
-                                          return candidateDistance < closestDistance ? candidate : closest;
-                                        },
-                                        paragraphElements[0]
-                                      ) : void 0;
-                                      if (fallbackParagraph && selectionIsExpandedWithinElement(
-                                        fallbackParagraph
-                                      )) {
+                                        }
+                                      },
+                                      onKeyUp: (event) => {
+                                        if (!shouldSyncActiveRangeOnKeyUp(event)) {
+                                          return;
+                                        }
                                         updateActiveTextRangeFromTableCell(
-                                          cellElement,
+                                          event.currentTarget,
                                           nodeIndex,
                                           rowIndex,
                                           cellIndex
                                         );
+                                      },
+                                      onKeyDown: (event) => {
                                         cancelPendingPointerSelectionReconcile();
-                                        return;
-                                      }
-                                      if (fallbackParagraph) {
-                                        schedulePointerSelectionReconcile(
-                                          fallbackParagraph,
-                                          {
-                                            x: event.clientX,
-                                            y: event.clientY
-                                          },
-                                          () => {
-                                            updateActiveTextRangeFromTableCell(
-                                              cellElement,
+                                        if (isCompositionKeyboardEvent(event)) {
+                                          editor.beginSelectionSession(
+                                            "composition"
+                                          );
+                                          return;
+                                        }
+                                        editor.beginSelectionSession("keyboard", {
+                                          settleAfterMs: 220
+                                        });
+                                        if (handleDeleteAcrossTableCellSelection(
+                                          event
+                                        )) {
+                                          return;
+                                        }
+                                        if (handleDeleteAcrossSelection(event)) {
+                                          return;
+                                        }
+                                        const handledHistoryShortcut = handleEditorHistoryShortcut(event, () => {
+                                          if (!cellUsesLegacyDraftEditing) {
+                                            return;
+                                          }
+                                          commitTableCellDraftFromElement(
+                                            nodeIndex,
+                                            rowIndex,
+                                            cellIndex,
+                                            cellParagraphs,
+                                            cellDraftKey,
+                                            event.currentTarget
+                                          );
+                                        });
+                                        if (handledHistoryShortcut) {
+                                          return;
+                                        }
+                                        const isPlainTextInsertKey = event.key.length === 1 && !event.metaKey && !event.ctrlKey && !event.altKey;
+                                        if (isPlainTextInsertKey) {
+                                          const replaced = replaceExpandedSelectionWithText(
+                                            event.key
+                                          );
+                                          if (replaced) {
+                                            event.preventDefault();
+                                            event.stopPropagation();
+                                            tableCellDraftsRef.current.delete(
+                                              cellDraftKey
+                                            );
+                                            return;
+                                          }
+                                        }
+                                        if (event.key === "Enter" && !event.metaKey && !event.ctrlKey && !event.altKey) {
+                                          const replaced = replaceExpandedSelectionWithText("\n");
+                                          if (replaced) {
+                                            event.preventDefault();
+                                            event.stopPropagation();
+                                            tableCellDraftsRef.current.delete(
+                                              cellDraftKey
+                                            );
+                                            return;
+                                          }
+                                        }
+                                        const paragraphContext = activeTableCellParagraphContext(
+                                          event.currentTarget
+                                        );
+                                        const activeParagraphIndex = paragraphContext?.paragraphIndex ?? 0;
+                                        const activeParagraph = cellParagraphs[activeParagraphIndex];
+                                        if (!activeParagraph || !paragraphContext?.paragraphElement) {
+                                          return;
+                                        }
+                                        const currentText = editableTextFromElement(
+                                          paragraphContext.paragraphElement
+                                        );
+                                        const isListParagraph = paragraphIsList(
+                                          activeParagraph,
+                                          currentText
+                                        );
+                                        const selectionOffsets = selectionOffsetsWithinElement(
+                                          paragraphContext.paragraphElement
+                                        );
+                                        const isCollapsedSelection = selectionOffsets !== void 0 && selectionOffsets.start === selectionOffsets.end;
+                                        const isPlainEnterKey = event.key === "Enter" && !event.metaKey && !event.ctrlKey && !event.altKey;
+                                        if (isPlainEnterKey && !isListParagraph) {
+                                          event.preventDefault();
+                                          event.stopPropagation();
+                                          const start = Math.max(
+                                            0,
+                                            Math.min(
+                                              selectionOffsets?.start ?? currentText.length,
+                                              currentText.length
+                                            )
+                                          );
+                                          const end = Math.max(
+                                            start,
+                                            Math.min(
+                                              selectionOffsets?.end ?? start,
+                                              currentText.length
+                                            )
+                                          );
+                                          const nextText = `${currentText.slice(
+                                            0,
+                                            start
+                                          )}
+${currentText.slice(end)}`;
+                                          editingIntentContinuationRef.current = void 0;
+                                          tableCellDraftsRef.current.delete(
+                                            cellDraftKey
+                                          );
+                                          tableCellParagraphDraftsRef.current.delete(
+                                            tableCellParagraphDraftKey(
                                               nodeIndex,
                                               rowIndex,
-                                              cellIndex
+                                              cellIndex,
+                                              activeParagraphIndex
+                                            )
+                                          );
+                                          editor.commitTableCellParagraphTextRecursive(
+                                            nodeIndex,
+                                            rowIndex,
+                                            cellIndex,
+                                            activeParagraphIndex,
+                                            nextText
+                                          );
+                                          focusTableCellParagraphAtOffset(
+                                            cellDraftKey,
+                                            activeParagraphIndex,
+                                            start + 1
+                                          );
+                                          return;
+                                        }
+                                        if (event.key === "Backspace" && !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && isListParagraph && isCollapsedSelection && (selectionOffsets?.start ?? -1) === 0) {
+                                          const listDepthChanged = editor.adjustSelectedListDepth(
+                                            -1,
+                                            currentText
+                                          );
+                                          let handledBackspace = listDepthChanged;
+                                          if (!handledBackspace) {
+                                            const listType = paragraphListType(
+                                              activeParagraph,
+                                              editor.model.metadata.numberingDefinitions
+                                            );
+                                            if (listType) {
+                                              editor.toggleList(listType);
+                                              handledBackspace = true;
+                                            }
+                                          }
+                                          if (handledBackspace) {
+                                            event.preventDefault();
+                                            event.stopPropagation();
+                                            editingIntentContinuationRef.current = void 0;
+                                            tableCellDraftsRef.current.delete(
+                                              cellDraftKey
+                                            );
+                                            focusTableCellParagraphAtOffset(
+                                              cellDraftKey,
+                                              activeParagraphIndex,
+                                              0
+                                            );
+                                            return;
+                                          }
+                                        }
+                                        if (event.key === "Tab" && !event.metaKey && !event.ctrlKey && !event.altKey && isListParagraph) {
+                                          event.preventDefault();
+                                          const listDepthChanged = editor.adjustSelectedListDepth(
+                                            event.shiftKey ? -1 : 1,
+                                            currentText
+                                          );
+                                          if (listDepthChanged) {
+                                            editingIntentContinuationRef.current = void 0;
+                                            tableCellDraftsRef.current.delete(
+                                              cellDraftKey
+                                            );
+                                            const targetOffset = selectionOffsets?.end ?? currentText.length;
+                                            focusTableCellParagraphAtOffset(
+                                              cellDraftKey,
+                                              activeParagraphIndex,
+                                              targetOffset
                                             );
                                           }
-                                        );
-                                      }
-                                    },
-                                    onKeyUp: (event) => {
-                                      if (!shouldSyncActiveRangeOnKeyUp(event)) {
-                                        return;
-                                      }
-                                      updateActiveTextRangeFromTableCell(
-                                        event.currentTarget,
-                                        nodeIndex,
-                                        rowIndex,
-                                        cellIndex
-                                      );
-                                    },
-                                    onKeyDown: (event) => {
-                                      cancelPendingPointerSelectionReconcile();
-                                      if (isCompositionKeyboardEvent(event)) {
-                                        editor.beginSelectionSession(
-                                          "composition"
-                                        );
-                                        return;
-                                      }
-                                      editor.beginSelectionSession("keyboard", {
-                                        settleAfterMs: 220
-                                      });
-                                      if (handleDeleteAcrossTableCellSelection(
-                                        event
-                                      )) {
-                                        return;
-                                      }
-                                      if (handleDeleteAcrossSelection(event)) {
-                                        return;
-                                      }
-                                      const handledHistoryShortcut = handleEditorHistoryShortcut(event, () => {
+                                          return;
+                                        }
+                                        if (event.key === "Tab" && !event.metaKey && !event.ctrlKey && !event.altKey) {
+                                          event.preventDefault();
+                                          const cells = node.rows.flatMap(
+                                            (candidateRow, candidateRowIndex) => candidateRow.cells.flatMap(
+                                              (candidate, candidateCellIndex) => candidate.style?.vMergeContinuation ? [] : [{ rowIndex: candidateRowIndex, cellIndex: candidateCellIndex }]
+                                            )
+                                          );
+                                          const currentIndex = cells.findIndex(
+                                            (candidate) => candidate.rowIndex === rowIndex && candidate.cellIndex === cellIndex
+                                          );
+                                          const target = cells[currentIndex + (event.shiftKey ? -1 : 1)];
+                                          if (target) {
+                                            (0, import_react_dom2.flushSync)(() => {
+                                              editor.selectTableCell(nodeIndex, target.rowIndex, target.cellIndex);
+                                            });
+                                            focusTableCellParagraphAtOffset(
+                                              [nodeIndex, target.rowIndex, target.cellIndex].join(":"),
+                                              0,
+                                              0
+                                            );
+                                          } else if (!event.shiftKey && currentIndex === cells.length - 1) {
+                                            (0, import_react_dom2.flushSync)(() => {
+                                              editor.insertTableRow(nodeIndex, rowIndex, "below");
+                                              editor.selectTableCell(nodeIndex, rowIndex + 1, 0);
+                                            });
+                                            focusTableCellParagraphAtOffset(
+                                              [nodeIndex, rowIndex + 1, 0].join(":"),
+                                              0,
+                                              0
+                                            );
+                                          }
+                                        }
+                                      },
+                                      onBlur: (event) => {
                                         if (!cellUsesLegacyDraftEditing) {
+                                          if (compositionActiveRef.current) {
+                                            compositionActiveRef.current = false;
+                                            const composedText = editableTextFromTableCellElement(
+                                              event.currentTarget
+                                            );
+                                            if (composedText !== tableCellText(cellParagraphs)) {
+                                              editor.suppressNextDomSelectionRestore();
+                                              editor.commitTableCellText(
+                                                nodeIndex,
+                                                rowIndex,
+                                                cellIndex,
+                                                composedText
+                                              );
+                                            }
+                                          }
+                                          return;
+                                        }
+                                        if (compositionActiveRef.current) {
+                                          compositionActiveRef.current = false;
+                                          tableCellDraftsRef.current.set(
+                                            cellDraftKey,
+                                            event.currentTarget.innerHTML
+                                          );
+                                        }
+                                        if (!tableCellDraftsRef.current.has(
+                                          cellDraftKey
+                                        )) {
                                           return;
                                         }
                                         commitTableCellDraftFromElement(
@@ -64821,289 +65109,103 @@ ${currentText.slice(end)}`;
                                           cellDraftKey,
                                           event.currentTarget
                                         );
-                                      });
-                                      if (handledHistoryShortcut) {
-                                        return;
                                       }
-                                      const isPlainTextInsertKey = event.key.length === 1 && !event.metaKey && !event.ctrlKey && !event.altKey;
-                                      if (isPlainTextInsertKey) {
-                                        const replaced = replaceExpandedSelectionWithText(
-                                          event.key
+                                    }
+                                  ) : slicedParagraphPlans && slicedCellViewportHeightPx ? /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(
+                                    "div",
+                                    {
+                                      style: {
+                                        position: "relative",
+                                        display: "grid",
+                                        alignContent: "start",
+                                        boxSizing: "border-box",
+                                        minHeight: slicedCellViewportHeightPx,
+                                        paddingTop: slicedParagraphPlans[0]?.topPx ?? 0,
+                                        // Preserve planned gaps while allowing native text to
+                                        // wrap onto an extra line without colliding with the next row.
+                                        gridTemplateRows: slicedParagraphPlans.map(
+                                          (plan, index) => `minmax(${Math.max(
+                                            0,
+                                            (slicedParagraphPlans[index + 1]?.topPx ?? slicedCellViewportHeightPx) - plan.topPx
+                                          )}px, max-content)`
+                                        ).join(" "),
+                                        overflow: "visible"
+                                      },
+                                      children: slicedParagraphPlans.map((plan) => {
+                                        const contentIndex = cell.nodes.indexOf(
+                                          plan.paragraph
                                         );
-                                        if (replaced) {
-                                          event.preventDefault();
-                                          event.stopPropagation();
-                                          tableCellDraftsRef.current.delete(
-                                            cellDraftKey
-                                          );
-                                          return;
-                                        }
-                                      }
-                                      if (event.key === "Enter" && !event.metaKey && !event.ctrlKey && !event.altKey) {
-                                        const replaced = replaceExpandedSelectionWithText("\n");
-                                        if (replaced) {
-                                          event.preventDefault();
-                                          event.stopPropagation();
-                                          tableCellDraftsRef.current.delete(
-                                            cellDraftKey
-                                          );
-                                          return;
-                                        }
-                                      }
-                                      const paragraphContext = activeTableCellParagraphContext(
-                                        event.currentTarget
-                                      );
-                                      const activeParagraphIndex = paragraphContext?.paragraphIndex ?? 0;
-                                      const activeParagraph = cellParagraphs[activeParagraphIndex];
-                                      if (!activeParagraph || !paragraphContext?.paragraphElement) {
-                                        return;
-                                      }
-                                      const currentText = editableTextFromElement(
-                                        paragraphContext.paragraphElement
-                                      );
-                                      const isListParagraph = paragraphIsList(
-                                        activeParagraph,
-                                        currentText
-                                      );
-                                      const selectionOffsets = selectionOffsetsWithinElement(
-                                        paragraphContext.paragraphElement
-                                      );
-                                      const isCollapsedSelection = selectionOffsets !== void 0 && selectionOffsets.start === selectionOffsets.end;
-                                      const isPlainEnterKey = event.key === "Enter" && !event.metaKey && !event.ctrlKey && !event.altKey;
-                                      if (isPlainEnterKey && !isListParagraph) {
-                                        event.preventDefault();
-                                        event.stopPropagation();
-                                        const start = Math.max(
-                                          0,
-                                          Math.min(
-                                            selectionOffsets?.start ?? currentText.length,
-                                            currentText.length
-                                          )
-                                        );
-                                        const end = Math.max(
-                                          start,
-                                          Math.min(
-                                            selectionOffsets?.end ?? start,
-                                            currentText.length
-                                          )
-                                        );
-                                        const nextText = `${currentText.slice(
-                                          0,
-                                          start
-                                        )}
-${currentText.slice(end)}`;
-                                        editingIntentContinuationRef.current = void 0;
-                                        tableCellDraftsRef.current.delete(
-                                          cellDraftKey
-                                        );
-                                        tableCellParagraphDraftsRef.current.delete(
-                                          tableCellParagraphDraftKey(
-                                            nodeIndex,
-                                            rowIndex,
-                                            cellIndex,
-                                            activeParagraphIndex
-                                          )
-                                        );
-                                        editor.commitTableCellParagraphTextRecursive(
-                                          nodeIndex,
-                                          rowIndex,
-                                          cellIndex,
-                                          activeParagraphIndex,
-                                          nextText
-                                        );
-                                        focusTableCellParagraphAtOffset(
-                                          cellDraftKey,
-                                          activeParagraphIndex,
-                                          start + 1
-                                        );
-                                        return;
-                                      }
-                                      if (event.key === "Backspace" && !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && isListParagraph && isCollapsedSelection && (selectionOffsets?.start ?? -1) === 0) {
-                                        const listDepthChanged = editor.adjustSelectedListDepth(
-                                          -1,
-                                          currentText
-                                        );
-                                        let handledBackspace = listDepthChanged;
-                                        if (!handledBackspace) {
-                                          const listType = paragraphListType(
-                                            activeParagraph,
-                                            editor.model.metadata.numberingDefinitions
-                                          );
-                                          if (listType) {
-                                            editor.toggleList(listType);
-                                            handledBackspace = true;
-                                          }
-                                        }
-                                        if (handledBackspace) {
-                                          event.preventDefault();
-                                          event.stopPropagation();
-                                          editingIntentContinuationRef.current = void 0;
-                                          tableCellDraftsRef.current.delete(
-                                            cellDraftKey
-                                          );
-                                          focusTableCellParagraphAtOffset(
-                                            cellDraftKey,
-                                            activeParagraphIndex,
-                                            0
-                                          );
-                                          return;
-                                        }
-                                      }
-                                      if (event.key === "Tab" && !event.metaKey && !event.ctrlKey && !event.altKey && isListParagraph) {
-                                        event.preventDefault();
-                                        const listDepthChanged = editor.adjustSelectedListDepth(
-                                          event.shiftKey ? -1 : 1,
-                                          currentText
-                                        );
-                                        if (listDepthChanged) {
-                                          editingIntentContinuationRef.current = void 0;
-                                          tableCellDraftsRef.current.delete(
-                                            cellDraftKey
-                                          );
-                                          const targetOffset = selectionOffsets?.end ?? currentText.length;
-                                          focusTableCellParagraphAtOffset(
-                                            cellDraftKey,
-                                            activeParagraphIndex,
-                                            targetOffset
-                                          );
-                                        }
-                                      }
-                                    },
-                                    onBlur: (event) => {
-                                      if (!cellUsesLegacyDraftEditing) {
-                                        if (compositionActiveRef.current) {
-                                          compositionActiveRef.current = false;
-                                          const composedText = editableTextFromTableCellElement(
-                                            event.currentTarget
-                                          );
-                                          if (composedText !== tableCellText(cellParagraphs)) {
-                                            editor.suppressNextDomSelectionRestore();
-                                            editor.commitTableCellText(
-                                              nodeIndex,
+                                        return /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(
+                                          "div",
+                                          {
+                                            style: {
+                                              position: "relative",
+                                              display: "flow-root",
+                                              minWidth: 0
+                                            },
+                                            children: renderSlicedTableCellParagraph({
+                                              pageIndex: options?.pageIndex,
+                                              paragraph: plan.paragraph,
+                                              paragraphIndex: plan.paragraphIndex,
+                                              tableIndex: nodeIndex,
                                               rowIndex,
                                               cellIndex,
-                                              composedText
-                                            );
-                                          }
-                                        }
-                                        return;
-                                      }
-                                      if (compositionActiveRef.current) {
-                                        compositionActiveRef.current = false;
-                                        tableCellDraftsRef.current.set(
-                                          cellDraftKey,
-                                          event.currentTarget.innerHTML
+                                              contentIndex,
+                                              cellContentWidthPx,
+                                              applyWordTableDefaults,
+                                              docGridLinePitchPx: nodeDocGridLinePitchPx,
+                                              layoutEntry: plan.layoutEntry,
+                                              useWholeTextLayout: usesPrecomputedPagination,
+                                              paragraphLineRange: plan.paragraphLineRange
+                                            })
+                                          },
+                                          `body-cell-slice-host-${nodeIndex}-${rowIndex}-${cellIndex}-${contentIndex}`
                                         );
-                                      }
-                                      if (!tableCellDraftsRef.current.has(
-                                        cellDraftKey
-                                      )) {
-                                        return;
-                                      }
-                                      commitTableCellDraftFromElement(
-                                        nodeIndex,
-                                        rowIndex,
-                                        cellIndex,
-                                        cellParagraphs,
-                                        cellDraftKey,
-                                        event.currentTarget
-                                      );
+                                      })
                                     }
-                                  }
-                                ) : slicedParagraphPlans && slicedCellViewportHeightPx ? /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(
-                                  "div",
-                                  {
-                                    style: {
-                                      position: "relative",
-                                      display: "grid",
-                                      alignContent: "start",
-                                      boxSizing: "border-box",
-                                      minHeight: slicedCellViewportHeightPx,
-                                      paddingTop: slicedParagraphPlans[0]?.topPx ?? 0,
-                                      // Preserve planned gaps while allowing native text to
-                                      // wrap onto an extra line without colliding with the next row.
-                                      gridTemplateRows: slicedParagraphPlans.map(
-                                        (plan, index) => `minmax(${Math.max(
-                                          0,
-                                          (slicedParagraphPlans[index + 1]?.topPx ?? slicedCellViewportHeightPx) - plan.topPx
-                                        )}px, max-content)`
-                                      ).join(" "),
-                                      overflow: "visible"
-                                    },
-                                    children: slicedParagraphPlans.map((plan) => {
-                                      const contentIndex = cell.nodes.indexOf(
-                                        plan.paragraph
-                                      );
-                                      return /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(
+                                  ) : isSlicedRow && slicedCellViewportHeightPx ? /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(
+                                    "div",
+                                    {
+                                      style: {
+                                        height: slicedCellViewportHeightPx,
+                                        overflow: "hidden",
+                                        position: "relative"
+                                      },
+                                      children: /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(
                                         "div",
                                         {
                                           style: {
-                                            position: "relative",
-                                            display: "flow-root",
-                                            minWidth: 0
+                                            display: "grid",
+                                            gap: 0,
+                                            transform: `translateY(-${tableRowSliceOffsetPx}px)`
                                           },
-                                          children: renderSlicedTableCellParagraph({
-                                            pageIndex: options?.pageIndex,
-                                            paragraph: plan.paragraph,
-                                            paragraphIndex: plan.paragraphIndex,
-                                            tableIndex: nodeIndex,
-                                            rowIndex,
-                                            cellIndex,
-                                            contentIndex,
-                                            cellContentWidthPx,
-                                            applyWordTableDefaults,
-                                            docGridLinePitchPx: nodeDocGridLinePitchPx,
-                                            layoutEntry: plan.layoutEntry,
-                                            useWholeTextLayout: usesPrecomputedPagination,
-                                            paragraphLineRange: plan.paragraphLineRange
-                                          })
-                                        },
-                                        `body-cell-slice-host-${nodeIndex}-${rowIndex}-${cellIndex}-${contentIndex}`
-                                      );
-                                    })
-                                  }
-                                ) : isSlicedRow && slicedCellViewportHeightPx ? /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(
-                                  "div",
-                                  {
-                                    style: {
-                                      height: slicedCellViewportHeightPx,
-                                      overflow: "hidden",
-                                      position: "relative"
-                                    },
-                                    children: /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(
-                                      "div",
-                                      {
-                                        style: {
-                                          display: "grid",
-                                          gap: 0,
-                                          transform: `translateY(-${tableRowSliceOffsetPx}px)`
-                                        },
-                                        children: renderStaticCellContent()
-                                      }
-                                    )
-                                  }
-                                ) : /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(
-                                  "div",
-                                  {
-                                    style: {
-                                      display: "grid",
-                                      gap: 0,
-                                      // Without the clip the row balloons to fit
-                                      // content (height on a <tr>/<td> is only
-                                      // ever a minimum).
-                                      ...automaticCollapsedCellMarginStyle,
-                                      ...exactRowSpanClipHeightPx !== void 0 && !isSlicedRow ? {
-                                        maxHeight: `${exactRowSpanClipHeightPx}px`,
-                                        overflow: "hidden"
-                                      } : void 0,
-                                      ...tableCellTextDirectionCss(
-                                        cell,
-                                        rowHeightsPx.slice(rowIndex, rowIndex + rowSpanValue).reduce((sum, height) => sum + (height ?? 0), 0) - cellPaddingPx.top - cellPaddingPx.bottom
+                                          children: renderStaticCellContent()
+                                        }
                                       )
-                                    },
-                                    children: renderStaticCellContent()
-                                  }
-                                )
+                                    }
+                                  ) : /* @__PURE__ */ (0, import_jsx_runtime6.jsx)(
+                                    "div",
+                                    {
+                                      style: {
+                                        display: "grid",
+                                        gap: 0,
+                                        // Without the clip the row balloons to fit
+                                        // content (height on a <tr>/<td> is only
+                                        // ever a minimum).
+                                        ...automaticCollapsedCellMarginStyle,
+                                        ...exactRowSpanClipHeightPx !== void 0 && !isSlicedRow ? {
+                                          maxHeight: `${exactRowSpanClipHeightPx}px`,
+                                          overflow: "hidden"
+                                        } : void 0,
+                                        ...tableCellTextDirectionCss(
+                                          cell,
+                                          rowHeightsPx.slice(rowIndex, rowIndex + rowSpanValue).reduce((sum, height) => sum + (height ?? 0), 0) - cellPaddingPx.top - cellPaddingPx.bottom
+                                        )
+                                      },
+                                      children: renderStaticCellContent()
+                                    }
+                                  )
+                                ]
                               },
                               `cell-${nodeIndex}-${rowIndex}-${cellIndex}`
                             );

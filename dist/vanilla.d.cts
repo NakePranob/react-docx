@@ -913,6 +913,17 @@ type DocxEditorSelection = {
     rowIndex: number;
     cellIndex: number;
 };
+interface DocxTableCellSelectionRange {
+    tableIndex: number;
+    anchorRowIndex: number;
+    anchorCellIndex: number;
+    focusRowIndex: number;
+    focusCellIndex: number;
+    gridRange?: {
+        startColumnIndex: number;
+        endColumnIndex: number;
+    };
+}
 interface ParagraphLocationInBody {
     kind: "paragraph";
     nodeIndex: number;
@@ -1137,6 +1148,19 @@ interface UseDocxEditorOptions {
  */
 interface DocxEditorController {
     model: DocModel;
+    /**
+     * THUNDER: runs an edit of the whole model as one undoable step, the way the
+     * editor's own commands do. Return `current` unchanged to make no step.
+     */
+    applyModelChange: (updater: (current: DocModel) => DocModel, successStatus?: string) => void;
+    /**
+     * THUNDER: the block of table cells selected in the viewer — by dragging
+     * across cells or selecting the whole table — or undefined when none is.
+     * Indices are the table's node index and each row's cell index.
+     */
+    tableCellSelection?: DocxTableCellSelectionRange;
+    /** THUNDER: where `DocxEditorViewer` reports its cell selection. */
+    reportTableCellSelection: (range: DocxTableCellSelectionRange | undefined) => void;
     documentLoadNonce: number;
     historyRevision: number;
     fileName: string;
