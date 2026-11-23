@@ -26270,9 +26270,10 @@ function tableUsesSeparateBorderModel(table: TableNode): boolean {
     return false;
   }
 
-  return table.rows.some((row) =>
-    row.cells.some((cell) => tableBorderSetHasVisibleEdges(cell.style?.borders))
-  );
+  // THUNDER: with no cell spacing a table's borders collapse, as in Word.
+  // Drawing cells with borders of their own apart (1px between cells) broke a
+  // frame into a dotted line and made such a table wider than its neighbours.
+  return false;
 }
 
 function resolveTableSeparateBorderSpacingPx(table: TableNode): number {
