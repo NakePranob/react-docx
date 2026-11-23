@@ -3853,6 +3853,34 @@ function parseParagraphLocationFromElement(
   return undefined;
 }
 
+/**
+ * THUNDER: the cell `step` rows above (-1) or below (1) that covers the grid
+ * column where `cellIndex` of `rowIndex` starts, skipping merged-away rows.
+ */
+function tableCellInColumn(
+  table: TableNode,
+  rowIndex: number,
+  cellIndex: number,
+  step: -1 | 1
+): { rowIndex: number; cellIndex: number } | undefined {
+  const startColumn = (row: TableNode["rows"][number], index: number): number =>
+    row.cells.slice(0, index).reduce((total, cell) => total + (cell.style?.gridSpan ?? 1), 0);
+  const column = startColumn(table.rows[rowIndex], cellIndex);
+  for (let next = rowIndex + step; next >= 0 && next < table.rows.length; next += step) {
+    const row = table.rows[next];
+    let at = 0;
+    for (let index = 0; index < row.cells.length; index += 1) {
+      const span = row.cells[index].style?.gridSpan ?? 1;
+      if (column >= at && column < at + span) {
+        if (row.cells[index].style?.vMergeContinuation) break;
+        return { rowIndex: next, cellIndex: index };
+      }
+      at += span;
+    }
+  }
+  return undefined;
+}
+
 function parseTableCellLocationFromElement(
   element: Element | null
 ): DocxTableCellLocation | undefined {
@@ -55551,6 +55579,46 @@ export function DocxEditorViewer({
                   if (
                     ((event.key === "ArrowUp" && sourceLineIndex === 0) ||
                       (event.key === "ArrowDown" && sourceLineIndex === currentLayout.lines.length - 1))) {
+                    // THUNDER: at a cell's first or last line, up and down go to the
+                    // cell above or below in the same column, as in Word. Reading
+                    // order took them to the next cell, which as a paragraph could
+                    // not be focused, and the caret was lost.
+                    if (location.kind === "table-cell" && !event.shiftKey) {
+                      const table = editor.model.nodes[location.tableIndex];
+                      const cellParagraphCount = table?.type === "table"
+                        ? tableCellParagraphs(table.rows[location.rowIndex]?.cells[location.cellIndex]?.nodes ?? []).length
+                        : 0;
+                      const atCellEdge = event.key === "ArrowUp"
+                        ? location.paragraphIndex === 0
+                        : location.paragraphIndex >= cellParagraphCount - 1;
+                      const verticalTarget = table?.type === "table" && atCellEdge
+                        ? tableCellInColumn(table, location.rowIndex, location.cellIndex, event.key === "ArrowUp" ? -1 : 1)
+                        : undefined;
+                      if (verticalTarget) {
+                        event.preventDefault();
+                        const targetLocation: ParagraphLocation = {
+                          kind: "table-cell",
+                          tableIndex: location.tableIndex,
+                          rowIndex: verticalTarget.rowIndex,
+                          cellIndex: verticalTarget.cellIndex,
+                          paragraphIndex: 0,
+                        };
+                        flushSync(() => {
+                          setActiveWrappedParagraphSession(undefined);
+                          editor.selectTableCell(location.tableIndex, verticalTarget.rowIndex, verticalTarget.cellIndex);
+                          editor.setActiveTextRange({
+                            start: { location: cloneTextRangeLocation(targetLocation), offset: 0 },
+                            end: { location: cloneTextRangeLocation(targetLocation), offset: 0 },
+                          });
+                        });
+                        focusTableCellParagraphAtOffset(
+                          [location.tableIndex, verticalTarget.rowIndex, verticalTarget.cellIndex].join(":"),
+                          0,
+                          0
+                        );
+                        return;
+                      }
+                    }
                     const target = event.key === "ArrowUp"
                       ? previousLocation()
                       : nextParagraphLocation(editor.model, location);
