@@ -63564,6 +63564,52 @@ export function DocxEditorViewer({
                                           targetOffset
                                         );
                                       }
+                                      return;
+                                    }
+                                    // THUNDER: Tab moves between cells from a cell in
+                                    // edit mode too, as it already did from a cell's
+                                    // paragraph; the browser otherwise takes focus out
+                                    // of the table. Tab in the last cell adds a row.
+                                    if (
+                                      event.key === "Tab" &&
+                                      !event.metaKey &&
+                                      !event.ctrlKey &&
+                                      !event.altKey
+                                    ) {
+                                      event.preventDefault();
+                                      const cells = node.rows.flatMap((candidateRow, candidateRowIndex) =>
+                                        candidateRow.cells.flatMap((candidate, candidateCellIndex) =>
+                                          candidate.style?.vMergeContinuation
+                                            ? []
+                                            : [{ rowIndex: candidateRowIndex, cellIndex: candidateCellIndex }]
+                                        )
+                                      );
+                                      const currentIndex = cells.findIndex(
+                                        (candidate) =>
+                                          candidate.rowIndex === rowIndex &&
+                                          candidate.cellIndex === cellIndex
+                                      );
+                                      const target = cells[currentIndex + (event.shiftKey ? -1 : 1)];
+                                      if (target) {
+                                        flushSync(() => {
+                                          editor.selectTableCell(nodeIndex, target.rowIndex, target.cellIndex);
+                                        });
+                                        focusTableCellParagraphAtOffset(
+                                          [nodeIndex, target.rowIndex, target.cellIndex].join(":"),
+                                          0,
+                                          0
+                                        );
+                                      } else if (!event.shiftKey && currentIndex === cells.length - 1) {
+                                        flushSync(() => {
+                                          editor.insertTableRow(nodeIndex, rowIndex, "below");
+                                          editor.selectTableCell(nodeIndex, rowIndex + 1, 0);
+                                        });
+                                        focusTableCellParagraphAtOffset(
+                                          [nodeIndex, rowIndex + 1, 0].join(":"),
+                                          0,
+                                          0
+                                        );
+                                      }
                                     }
                                   }}
                                   onBlur={(event) => {

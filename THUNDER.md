@@ -52,5 +52,6 @@ after (the application's tasks name them).
 | 1 | controller exposes `applyModelChange` (one undoable step) and the viewer's selected cell block (`tableCellSelection`, reported by `DocxEditorViewer` through `reportTableCellSelection`); `DocxTableCellSelectionRange` exported | `react-viewer/src/editor.tsx`, `index.tsx`, `tests/unit/thunder-controller-api.test.ts` |
 | 2 | a drag that starts on a cell's text and reaches another cell selects the block of cells (upstream only did so from a cell's padding, which a table with no cell padding does not have), and the selected cells are drawn — upstream tracked the block but never showed it | `react-viewer/src/editor.tsx` |
 | 3 | a table with no cell spacing always collapses its borders, as Word does; cells with borders of their own no longer push the table into the separated model (1px between cells), which drew frames dotted and such tables wider | `react-viewer/src/editor.tsx` |
+| 4 | Tab / Shift+Tab move between cells from a cell in edit mode too (upstream did so only from a cell's paragraph, so the second Tab left the table); Tab in the last cell adds a row | `react-viewer/src/editor.tsx` |
 
 `v0.15.2-thunder.0` is upstream 0.15.2 as built here.
