@@ -45,6 +45,7 @@ import {
   useViewerZoom,
 } from "./viewer-zoom";
 import { copyModelForParagraphEdits, imageDropPositionAtTextOffset, insertImageAtDropPosition } from "./image-drop";
+import { editAroundLockedFields, isLockedField } from "./locked-fields";
 import { renderToStaticMarkup } from "react-dom/server";
 import { useVirtualizer, useWindowVirtualizer } from "@tanstack/react-virtual";
 import {
@@ -157,6 +158,7 @@ import {
   mergeCellParagraphTexts,
   resolveEditingIntent,
   shouldCoalesceTextCommit,
+  type EditingIntent,
   type TextCommitBurst,
 } from "./editing-intents";
 import {
@@ -1639,6 +1641,18 @@ function setSelectionWithinElementByTextOffsetsDom(
 
       const textLength = currentTextNode.textContent?.length ?? 0;
       if (traversed + textLength >= safeOffset) {
+        // THUNDER: a locked field is one unit; a caret goes beside it, never
+        // into its text, where nothing typed would reach the editor.
+        const field = currentTextNode.parentElement?.closest(
+          "[data-docx-locked-field='true']"
+        );
+        if (field?.parentNode) {
+          const index = Array.prototype.indexOf.call(field.parentNode.childNodes, field) as number;
+          return {
+            node: field.parentNode,
+            offset: safeOffset <= traversed ? index : index + 1,
+          };
+        }
         return {
           node: currentTextNode,
           offset: Math.max(0, safeOffset - traversed),
@@ -4414,6 +4428,12 @@ export interface UseDocxEditorOptions {
    */
   useWorker?: boolean | "required";
   /**
+   * THUNDER: rewrites each imported document's model before the editor holds
+   * it — part of the load, not an edit, so it leaves the history empty. Read on
+   * every import, like `useWorker`.
+   */
+  transformImportedModel?: (model: DocModel) => DocModel;
+  /**
    * Model used for `editor.newDocument()` and for the initial empty editor.
    *
    * @defaultValue `defaultStarterModel`
@@ -4723,6 +4743,16 @@ export interface DocxEditorController {
     cellIndex: number,
     text: string,
     caret: { paragraphIndex: number; start: number; end: number }
+  ) => boolean;
+  /**
+   * THUNDER: replaces a paragraph's runs as a text edit — one undo step, or
+   * part of the last one when `coalesceKey` continues a burst of typing.
+   */
+  commitParagraphChildrenAtRange: (
+    location: ParagraphLocation,
+    children: ParagraphNode["children"],
+    caret: number,
+    options?: { insertionOffset?: number; coalesceKey?: string }
   ) => boolean;
   commitSectionParagraphText: (
     location: DocxSectionParagraphLocation,
@@ -5102,6 +5132,12 @@ export interface DocxEditorViewerProps {
   renderTableContextMenu?: (
     props: DocxTableContextMenuRenderProps
   ) => React.ReactNode;
+  /**
+   * THUNDER: turns typed or pasted text into inline nodes — the template
+   * editor's `{{…}}` into locked fields. Return undefined to insert the text
+   * as it is.
+   */
+  inlineNodesFromText?: (text: string) => ParagraphNode["children"] | undefined;
   /**
    * Custom renderer for text, image, and table context menus.
    *
@@ -8156,7 +8192,10 @@ export function buildParagraphPretextLayoutSource(
   },
   typography?: DocxTypographyOptions
 ): ParagraphPretextLayoutSource | undefined {
-  if (paragraph.children.some((child) => child.type === "text" && child.fieldInstruction !== undefined)) {
+  if (paragraph.children.some((child) => (child.type === "text" && child.fieldInstruction !== undefined) ||
+    isLockedField(child))) {
+    // THUNDER: a locked field is edited on the contenteditable path, which
+    // knows it is one unit; the wrapped-text path would edit its label.
     return undefined;
   }
   if (options?.defaultTabStopTwips !== undefined) {
@@ -30367,6 +30406,10 @@ export function useDocxEditor(
   React.useEffect(() => {
     importUseWorkerRef.current = options.useWorker;
   }, [options.useWorker]);
+  const importTransformRef = React.useRef(options.transformImportedModel);
+  React.useEffect(() => {
+    importTransformRef.current = options.transformImportedModel;
+  }, [options.transformImportedModel]);
   const [historyRestoreRequest, setHistoryRestoreRequest] = React.useState<
     DocxHistoryRestoreRequest | undefined
   >();
@@ -31430,7 +31473,7 @@ export function useDocxEditor(
           workerEndMark
         );
         const pkg = importResult.package;
-        const nextModel = importResult.model;
+        const nextModel = importTransformRef.current?.(importResult.model) ?? importResult.model;
 
         markDocxImportPerformance(fontsStartMark);
         await loadEmbeddedFontsFromPackage(pkg);
@@ -35411,6 +35454,58 @@ export function useDocxEditor(
     [dispatchEditorTransaction]
   );
 
+  const commitParagraphChildrenAtRange = React.useCallback(
+    (
+      location: ParagraphLocation,
+      children: ParagraphNode["children"],
+      caret: number,
+      options?: { insertionOffset?: number; coalesceKey?: string }
+    ): boolean => {
+      const now = Date.now();
+      const coalesce =
+        options?.coalesceKey !== undefined &&
+        shouldCoalesceTextCommit(textCommitBurstRef.current, {
+          key: options.coalesceKey,
+          caretBefore: options.insertionOffset ?? caret,
+          at: now,
+        });
+      textCommitBurstRef.current =
+        options?.coalesceKey !== undefined
+          ? { key: options.coalesceKey, caretAfter: caret, at: now }
+          : undefined;
+      return dispatchEditorTransaction((current) => {
+        const { paragraph } = getParagraphAtLocation(current.model, location);
+        if (!paragraph) {
+          return undefined;
+        }
+        const nextModel = copyModelForParagraphEdits(current.model, [location]);
+        const nextParagraph = getParagraphAtLocation(nextModel, location).paragraph;
+        if (!nextParagraph) {
+          return undefined;
+        }
+        nextParagraph.children = children;
+        nextParagraph.sourceXml = undefined;
+        const tableNode =
+          location.kind === "table-cell" ? nextModel.nodes[location.tableIndex] : undefined;
+        if (tableNode?.type === "table") {
+          tableNode.sourceXml = undefined;
+        }
+        return {
+          model: nextModel,
+          selection: selectionFromTextRangeLocation(location),
+          activeTextRange: {
+            start: { location: cloneTextRangeLocation(location), offset: caret },
+            end: { location: cloneTextRangeLocation(location), offset: caret },
+          },
+          pushHistory: !coalesce,
+          clearSelectedFormField: true,
+          textInput: true,
+        };
+      });
+    },
+    [dispatchEditorTransaction]
+  );
+
   const commitTableCellTextAtRange = React.useCallback(
     (
       tableIndex: number,
@@ -35696,6 +35791,7 @@ export function useDocxEditor(
     commitTableCellText,
     commitTableCellParagraphTextRecursive,
     commitParagraphTextAtRange,
+    commitParagraphChildrenAtRange,
     commitTableCellTextAtRange,
     commitSectionParagraphText,
   };
@@ -39183,6 +39279,7 @@ export function DocxEditorViewer({
   showComments,
   renderCommentCard,
   renderTableContextMenu,
+  inlineNodesFromText,
   renderContextMenu,
   onFormFieldDoubleClick,
   mode = "edit",
@@ -39199,6 +39296,8 @@ export function DocxEditorViewer({
   React.useEffect(() => () => tableResizeCleanupRef.current?.(), []);
   const sourceModelRef = React.useRef(sourceEditor.model);
   sourceModelRef.current = sourceEditor.model;
+  const inlineNodesFromTextRef = React.useRef(inlineNodesFromText);
+  inlineNodesFromTextRef.current = inlineNodesFromText;
   const reviewDisplay = React.useMemo(
     () => (showTrackedChanges ?? sourceEditor.showTrackedChanges)
       ? reviewDisplayModel(sourceEditor.model, revisionDisplay)
@@ -50944,6 +51043,38 @@ export function DocxEditorViewer({
           : undefined;
       };
 
+      // THUNDER: an edit that reaches into a locked field takes the whole
+      // field, and text that `inlineNodesFromText` recognises goes in as
+      // nodes. Undefined leaves the edit to the ordinary text path.
+      const lockedFieldEdit = (
+        paragraph: ParagraphNode,
+        text: string,
+        range: { start: number; end: number },
+        editIntent: EditingIntent
+      ): { children: ParagraphNode["children"]; caret: number } | undefined => {
+        let { start, end } = range;
+        let inserted: string | ParagraphNode["children"];
+        if (editIntent.kind === "insertText" || editIntent.kind === "replaceText") {
+          inserted = inlineNodesFromTextRef.current?.(editIntent.text) ?? editIntent.text;
+        } else if (editIntent.kind === "insertLineBreak") {
+          inserted = "\n";
+        } else if (editIntent.kind === "deleteRange") {
+          inserted = "";
+        } else if (editIntent.kind === "deleteContent") {
+          if (start === end) {
+            const applied = applyTextEditingIntent(text, start, end, editIntent);
+            const removed = applied ? text.length - applied.text.length : 0;
+            if (removed <= 0) return undefined;
+            if (editIntent.direction === "backward") start -= removed;
+            else end += removed;
+          }
+          inserted = "";
+        } else {
+          return undefined;
+        }
+        return editAroundLockedFields(paragraph, text, start, end, inserted);
+      };
+
       const paragraphHost = targetElement.closest<HTMLElement>(
         "[data-docx-paragraph-host='true'][data-docx-paragraph-kind='paragraph']"
       );
@@ -51099,6 +51230,28 @@ export function DocxEditorViewer({
             intent.kind === "deleteRange")
             ? resolveTargetRangeOffsets(paragraphHost) ?? selectionOffsets
             : selectionOffsets;
+
+        const lockedEdit = lockedFieldEdit(node, currentText, rangeOffsets, intent);
+        if (lockedEdit) {
+          editingIntentContinuationRef.current = undefined;
+          const lockedCoalesceClass = editingIntentCoalesceClass(intent);
+          editor.commitParagraphChildrenAtRange(location, lockedEdit.children, lockedEdit.caret, {
+            insertionOffset: rangeOffsets.start,
+            ...(lockedCoalesceClass
+              ? { coalesceKey: `p:${nodeIndex}:${lockedCoalesceClass}` }
+              : undefined),
+          });
+          pendingEditableCaretRef.current = {
+            nodeIndex,
+            start: lockedEdit.caret,
+            end: lockedEdit.caret,
+          };
+          // A paragraph that lost its last field is drawn the other way, and
+          // the pending caret above only finds an editable host.
+          focusParagraphAtOffset(nodeIndex, lockedEdit.caret);
+          schedulePaginationMeasurementResume();
+          return;
+        }
 
         const applied = applyTextEditingIntent(
           currentText,
@@ -51379,6 +51532,30 @@ export function DocxEditorViewer({
           ? resolveTargetRangeOffsets(paragraphElement) ?? selectionOffsets
           : selectionOffsets;
 
+      const lockedEdit = lockedFieldEdit(
+        cellParagraphNodes[paragraphIndex],
+        currentText,
+        rangeOffsets,
+        effectiveIntent
+      );
+      if (lockedEdit) {
+        editingIntentContinuationRef.current = undefined;
+        const lockedCoalesceClass = editingIntentCoalesceClass(effectiveIntent);
+        editor.commitParagraphChildrenAtRange(cellLocation, lockedEdit.children, lockedEdit.caret, {
+          insertionOffset: rangeOffsets.start,
+          ...(lockedCoalesceClass
+            ? { coalesceKey: `${continuationPrefix}${paragraphIndex}:${lockedCoalesceClass}` }
+            : undefined),
+        });
+        focusTableCellParagraphAtOffset(
+          `${tableIndex}:${rowIndex}:${cellIndex}`,
+          paragraphIndex,
+          lockedEdit.caret
+        );
+        schedulePaginationMeasurementResume();
+        return;
+      }
+
       const applied = applyTextEditingIntent(
         currentText,
         rangeOffsets.start,
@@ -51452,6 +51629,7 @@ export function DocxEditorViewer({
       cancelPendingPointerSelectionReconcile,
       editor,
       focusParagraphAtOffset,
+      focusTableCellParagraphAtOffset,
       isReadOnly,
       schedulePaginationMeasurementResume,
       selectionOffsetsWithinElement,
@@ -51473,6 +51651,202 @@ export function DocxEditorViewer({
       rootElement.removeEventListener("beforeinput", handleBeforeInput);
     };
   }, [handleEditableHostBeforeInput]);
+
+  // THUNDER: copying a locked field copies its source (`tag`), so pasting it
+  // back makes the same field again rather than text of its label.
+  //
+  // Registered once, on the window: the editor re-renders inside a key or
+  // pointer dispatch, and a listener re-registered by an effect then is
+  // dropped from that very dispatch.
+  const lockedFieldReadOnlyRef = React.useRef(isReadOnly);
+  lockedFieldReadOnlyRef.current = isReadOnly;
+  React.useEffect(() => {
+    const rootOf = (node: Node | null | undefined): HTMLElement | undefined => {
+      const viewerRoot = viewerRootRef.current;
+      return viewerRoot && node && viewerRoot.contains(node) ? viewerRoot : undefined;
+    };
+    const handleCopy = (event: ClipboardEvent): void => {
+      const domSelection = window.getSelection();
+      if (!event.clipboardData || !domSelection || domSelection.rangeCount === 0 || domSelection.isCollapsed) {
+        return;
+      }
+      const range = domSelection.getRangeAt(0);
+      if (!rootOf(range.commonAncestorContainer)) {
+        return;
+      }
+      const fragment = range.cloneContents();
+      const fields = fragment.querySelectorAll("[data-docx-locked-field='true']");
+      if (fields.length === 0) {
+        return;
+      }
+      fields.forEach((field) => {
+        field.replaceWith(field.getAttribute("data-docx-locked-source") ?? field.textContent ?? "");
+      });
+      fragment.querySelectorAll("br").forEach((lineBreak) => lineBreak.replaceWith("\n"));
+      event.clipboardData.setData("text/plain", fragment.textContent ?? "");
+      event.preventDefault();
+      if (event.type === "cut" && !lockedFieldReadOnlyRef.current) {
+        const anchor = domSelection.anchorNode;
+        const target = anchor instanceof Element ? anchor : anchor?.parentElement;
+        target?.dispatchEvent(
+          new InputEvent("beforeinput", { bubbles: true, cancelable: true, inputType: "deleteByCut" })
+        );
+      }
+    };
+    // A click on a locked field selects the whole field, as Word selects a
+    // field. Delegated: an editable host serializes its children, so a
+    // handler on the field itself never runs.
+    const handlePointerDown = (event: PointerEvent): void => {
+      if (
+        lockedFieldReadOnlyRef.current ||
+        event.button !== 0 ||
+        !(event.target instanceof Element) ||
+        !rootOf(event.target)
+      ) {
+        return;
+      }
+      const field = event.target.closest<HTMLElement>("[data-docx-locked-field='true']");
+      if (!field) {
+        // A click past a field that ends its line puts the caret after it.
+        // The browser would put it in the field's text, or the editor at the
+        // end of the text before it.
+        const host = event.target.closest<HTMLElement>("[contenteditable='true']");
+        const fieldEndingLine = host
+          ? Array.from(host.querySelectorAll<HTMLElement>("[data-docx-locked-field='true']")).find((candidate) => {
+              const rects = candidate.getClientRects();
+              const last = rects[rects.length - 1];
+              if (!last || event.clientX < last.right || event.clientY < last.top || event.clientY > last.bottom) {
+                return false;
+              }
+              const next = candidate.nextSibling;
+              if (!next || !(next.textContent ?? "").length) return true;
+              const probe = document.createRange();
+              if (next instanceof Text) {
+                probe.setStart(next, 0);
+                probe.setEnd(next, 1);
+              } else {
+                probe.selectNode(next);
+              }
+              const nextRect = probe.getClientRects()[0];
+              return !nextRect || nextRect.top >= last.bottom - 1;
+            })
+          : undefined;
+        if (!host || !fieldEndingLine) {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        host.focus({ preventScroll: true });
+        const caret = document.createRange();
+        caret.setStartAfter(fieldEndingLine);
+        caret.collapse(true);
+        const domSelection = window.getSelection();
+        domSelection?.removeAllRanges();
+        domSelection?.addRange(caret);
+        return;
+      }
+      const selectField = (element: HTMLElement): boolean => {
+        const host = element.closest<HTMLElement>("[contenteditable='true']");
+        if (!host) return false;
+        host.focus({ preventScroll: true });
+        const range = document.createRange();
+        range.setStartBefore(element);
+        range.setEndAfter(element);
+        const domSelection = window.getSelection();
+        domSelection?.removeAllRanges();
+        domSelection?.addRange(range);
+        return true;
+      };
+      if (selectField(field)) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      // Not yet editable: the click goes on and opens the paragraph for
+      // editing, which draws the field again; select it once it is there.
+      const sourceId = field.getAttribute("data-docx-source-id");
+      if (!sourceId) return;
+      let frames = 0;
+      const retry = (): void => {
+        const drawn = viewerRootRef.current?.querySelector<HTMLElement>(
+          `[data-docx-locked-field='true'][data-docx-source-id="${CSS.escape(sourceId)}"]`
+        );
+        if ((drawn && selectField(drawn)) || ++frames > 30) return;
+        requestAnimationFrame(retry);
+      };
+      window.setTimeout(() => requestAnimationFrame(retry), 0);
+    };
+    // A key that edits a selection holding a locked field goes to the browser,
+    // whose beforeinput the editing path above turns into a whole-field edit.
+    // The editor's own keydown would apply it to its last text range instead.
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (lockedFieldReadOnlyRef.current || event.isComposing || event.ctrlKey || event.metaKey || event.altKey) {
+        return;
+      }
+      const edits =
+        event.key === "Backspace" || event.key === "Delete" || event.key.length === 1;
+      const domSelection = window.getSelection();
+      if (!edits || !domSelection || domSelection.rangeCount === 0 || domSelection.isCollapsed) {
+        return;
+      }
+      const range = domSelection.getRangeAt(0);
+      if (
+        rootOf(range.commonAncestorContainer) &&
+        range.cloneContents().querySelector("[data-docx-locked-field='true']")
+      ) {
+        event.stopPropagation();
+        if (event.key === "Backspace" || event.key === "Delete") {
+          // The browser raises no input for deleting a selection that holds a
+          // non-editable node; raise it here, as the cut handler does.
+          event.preventDefault();
+          const anchor = range.startContainer;
+          const target = anchor instanceof Element ? anchor : anchor.parentElement;
+          target?.dispatchEvent(
+            new InputEvent("beforeinput", {
+              bubbles: true,
+              cancelable: true,
+              inputType: event.key === "Backspace" ? "deleteContentBackward" : "deleteContentForward",
+            })
+          );
+        }
+      }
+    };
+    // The browser puts a caret inside a field's text when a click lands past
+    // a field that ends its line; nothing typed there reaches the editor.
+    // Move it out to the nearer side.
+    const handleSelectionChange = (): void => {
+      const domSelection = window.getSelection();
+      if (!domSelection || domSelection.rangeCount === 0 || !domSelection.isCollapsed) {
+        return;
+      }
+      const node = domSelection.anchorNode;
+      const element = node instanceof Element ? node : node?.parentElement;
+      const field = element?.closest<HTMLElement>("[data-docx-locked-field='true']");
+      if (!field || !rootOf(field)) {
+        return;
+      }
+      const atStart =
+        domSelection.anchorOffset === 0 && (node === field || node === field.firstChild);
+      const range = document.createRange();
+      if (atStart) range.setStartBefore(field);
+      else range.setStartAfter(field);
+      range.collapse(true);
+      domSelection.removeAllRanges();
+      domSelection.addRange(range);
+    };
+    document.addEventListener("selectionchange", handleSelectionChange);
+    window.addEventListener("keydown", handleKeyDown, true);
+    window.addEventListener("copy", handleCopy, true);
+    window.addEventListener("cut", handleCopy, true);
+    window.addEventListener("pointerdown", handlePointerDown, true);
+    return () => {
+      document.removeEventListener("selectionchange", handleSelectionChange);
+      window.removeEventListener("keydown", handleKeyDown, true);
+      window.removeEventListener("copy", handleCopy, true);
+      window.removeEventListener("cut", handleCopy, true);
+      window.removeEventListener("pointerdown", handlePointerDown, true);
+    };
+  }, []);
 
   const resolveTableColumnWidths = React.useCallback(
     (tableIndex: number, table: TableNode, tableWidthPx?: number): number[] => {
@@ -58438,7 +58812,43 @@ export function DocxEditorViewer({
             boxSizing: "border-box",
           };
 
-          if (child.fieldType === "checkbox") {
+          if (child.fieldType === "text" && child.widget?.enabled === false) {
+            // THUNDER: a locked text field is one unit the caret steps over —
+            // the template editor's variables. Drawn as its value, the width
+            // the layout measured, with the chip look painted outside it.
+            const chipText = formFieldDisplayValue(child) || "\u00a0";
+            nodes.push(
+              <span
+                key={runKey}
+                contentEditable={false}
+                data-docx-source-id={paragraph.blockId ? `${paragraph.blockId}/child/${childIndex}` : undefined}
+                data-docx-form-field="true"
+                data-docx-form-field-child-index={childIndex}
+                data-docx-form-field-type="text"
+                data-docx-locked-field="true"
+                data-docx-locked-source={child.tag ?? chipText}
+                title={child.title}
+                style={{
+                  ...runStyleToCss(child.style, documentContentTheme, chipText, paragraphBaseFontSizePx(paragraph) * 72 / 96, typography),
+                  // Painted inside the line, not the font's taller box, so a
+                  // field never covers the line above or below it.
+                  backgroundImage:
+                    "linear-gradient(rgba(234, 88, 12, 0.16), rgba(234, 88, 12, 0.16))",
+                  backgroundSize: "100% 62%",
+                  backgroundPosition: "0 55%",
+                  backgroundRepeat: "no-repeat",
+                  boxDecorationBreak: "clone",
+                  WebkitBoxDecorationBreak: "clone",
+                  cursor: isReadOnly ? "default" : "pointer",
+                  userSelect: "none",
+                  whiteSpace: "pre-wrap",
+                }}
+              >
+                {scriptFontTextContent(chipText, child.style, runKey, paragraphBaseFontSizePx(paragraph) * 72 / 96, typography)}
+              </span>
+            );
+            trackTextAdvance(chipText, child.style);
+          } else if (child.fieldType === "checkbox") {
             const checkboxSymbol =
               child.checked ?? child.widget?.checkbox?.defaultChecked
                 ? child.checkedSymbol ?? "☒"

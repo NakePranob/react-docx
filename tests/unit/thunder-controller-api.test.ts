@@ -16,6 +16,7 @@ describe("controller extension points", () => {
 
     expect(typeof editor?.applyModelChange).toBe("function");
     expect(typeof editor?.reportTableCellSelection).toBe("function");
+    expect(typeof editor?.commitParagraphChildrenAtRange).toBe("function");
     expect(editor?.tableCellSelection).toBeUndefined();
   });
 });
