@@ -45,7 +45,7 @@ import {
   useViewerZoom,
 } from "./viewer-zoom";
 import { copyModelForParagraphEdits, imageDropPositionAtTextOffset, insertImageAtDropPosition } from "./image-drop";
-import { editAroundLockedFields, isLockedField } from "./locked-fields";
+import { editAroundLockedFields, isLockedField, lockedFieldText } from "./locked-fields";
 import { renderToStaticMarkup } from "react-dom/server";
 import { useVirtualizer, useWindowVirtualizer } from "@tanstack/react-virtual";
 import {
@@ -27613,7 +27613,18 @@ function mutateParagraphTextStyleInRange(
   for (const child of paragraph.children) {
     if (child.type !== "text") {
       if (child.type === "form-field") {
-        nextChildren.push(cloneFormFieldRun(child));
+        const field = cloneFormFieldRun(child);
+        if (isLockedField(child)) {
+          // THUNDER: a locked field takes its share of the text offsets, as
+          // the editable text counts it, and its style with the text around it.
+          const fieldStart = cursor;
+          cursor += lockedFieldText(child).length;
+          if (fieldStart < safeEnd && cursor > safeStart) {
+            field.style = mutator(cloneTextStyle(child.style));
+            touched = true;
+          }
+        }
+        nextChildren.push(field);
       } else {
         nextChildren.push({
           type: "image",
@@ -51660,6 +51671,8 @@ export function DocxEditorViewer({
   // dropped from that very dispatch.
   const lockedFieldReadOnlyRef = React.useRef(isReadOnly);
   lockedFieldReadOnlyRef.current = isReadOnly;
+  const lockedFieldEditorRef = React.useRef(editor);
+  lockedFieldEditorRef.current = editor;
   React.useEffect(() => {
     const rootOf = (node: Node | null | undefined): HTMLElement | undefined => {
       const viewerRoot = viewerRootRef.current;
@@ -51755,6 +51768,18 @@ export function DocxEditorViewer({
         const domSelection = window.getSelection();
         domSelection?.removeAllRanges();
         domSelection?.addRange(range);
+        // The toolbar's commands read the editor's text range, not the DOM's.
+        const paragraphElement = element.closest<HTMLElement>("[data-docx-paragraph-kind]");
+        const location = parseParagraphLocationFromElement(paragraphElement);
+        const offsets = paragraphElement
+          ? selectionOffsetsWithinElementDom(paragraphElement)
+          : undefined;
+        if (location && offsets) {
+          lockedFieldEditorRef.current.setActiveTextRange({
+            start: { location: cloneTextRangeLocation(location), offset: offsets.start },
+            end: { location: cloneTextRangeLocation(location), offset: offsets.end },
+          });
+        }
         return true;
       };
       if (selectField(field)) {
