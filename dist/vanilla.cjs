@@ -42041,7 +42041,16 @@ function mutateParagraphTextStyleInRange(paragraph, startOffset, endOffset, muta
   for (const child of paragraph.children) {
     if (child.type !== "text") {
       if (child.type === "form-field") {
-        nextChildren.push(cloneFormFieldRun2(child));
+        const field = cloneFormFieldRun2(child);
+        if (isLockedField(child)) {
+          const fieldStart = cursor;
+          cursor += lockedFieldText(child).length;
+          if (fieldStart < safeEnd && cursor > safeStart) {
+            field.style = mutator(cloneTextStyle4(child.style));
+            touched = true;
+          }
+        }
+        nextChildren.push(field);
       } else {
         nextChildren.push({
           type: "image",
@@ -58781,6 +58790,8 @@ function DocxEditorViewer({
   }, [handleEditableHostBeforeInput]);
   const lockedFieldReadOnlyRef = A2(isReadOnly);
   lockedFieldReadOnlyRef.current = isReadOnly;
+  const lockedFieldEditorRef = A2(editor);
+  lockedFieldEditorRef.current = editor;
   h2(() => {
     const rootOf = (node) => {
       const viewerRoot = viewerRootRef.current;
@@ -58863,6 +58874,15 @@ function DocxEditorViewer({
         const domSelection = window.getSelection();
         domSelection?.removeAllRanges();
         domSelection?.addRange(range);
+        const paragraphElement = element.closest("[data-docx-paragraph-kind]");
+        const location = parseParagraphLocationFromElement(paragraphElement);
+        const offsets = paragraphElement ? selectionOffsetsWithinElementDom(paragraphElement) : void 0;
+        if (location && offsets) {
+          lockedFieldEditorRef.current.setActiveTextRange({
+            start: { location: cloneTextRangeLocation(location), offset: offsets.start },
+            end: { location: cloneTextRangeLocation(location), offset: offsets.end }
+          });
+        }
         return true;
       };
       if (selectField(field)) {
