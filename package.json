@@ -1,0 +1,69 @@
+{
+  "name": "@extend-ai/react-docx",
+  "version": "0.15.2-thunder.0",
+  "description": "JavaScript and React viewers for DOCX documents",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/extend-hq/react-docx.git",
+    "directory": "packages/react-viewer"
+  },
+  "bugs": {
+    "url": "https://github.com/extend-hq/react-docx/issues"
+  },
+  "homepage": "https://github.com/extend-hq/react-docx#readme",
+  "keywords": [
+    "docx",
+    "react",
+    "viewer",
+    "editor",
+    "ooxml"
+  ],
+  "main": "dist/index.cjs",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./vanilla": {
+      "types": "./dist/vanilla.d.ts",
+      "import": "./dist/vanilla.js",
+      "require": "./dist/vanilla.cjs"
+    },
+    "./internal": {
+      "types": "./dist/internal.d.ts",
+      "import": "./dist/internal.js",
+      "require": "./dist/internal.cjs"
+    },
+    "./docx_wasm_bg.wasm": "./dist/docx_wasm_bg.wasm",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "react": ">=18",
+    "react-dom": ">=18"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "react-dom": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "@chenglou/pretext": "1.0.0",
+    "csstype": "^3.1.0",
+    "fast-png": "^8.0.0",
+    "utif": "^3.1.0"
+  }
+}

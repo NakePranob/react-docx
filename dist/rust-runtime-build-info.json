@@ -1,0 +1,13 @@
+{
+  "source": "registry",
+  "rustDocxVersion": "0.5.7",
+  "rustDocxWasmVersion": "0.5.7",
+  "rustOfficeArtVersion": "0.2.2",
+  "rustOfficeChartsVersion": "0.3.3",
+  "rustOdfVersion": "0.3.2",
+  "rustSourceSha256": "7834e2a4ba470e326a18062f252424b723e6a4e9251189af2523d20b2c3af1c5",
+  "wasmSha256": "9f97d07312e9a8e08c73a038311e48f8475a3295a3c3e233f5debd8c6deea3b2",
+  "cargoLockSha256": "faea336a095e7f6d87f11b37a9a928acb05081172ad5c9a80631e1adfc2adbb3",
+  "rustc": "rustc 1.93.1 (01f6ddf75 2026-02-11)",
+  "noticesSha256": "97b56de03efaa0fc8fa5f8999e8ddc0d2fecc7b4a65af4be74302251d3eadc55"
+}
