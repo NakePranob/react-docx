@@ -1678,6 +1678,12 @@ interface UseDocxEditorOptions {
      */
     useWorker?: boolean | "required";
     /**
+     * THUNDER: rewrites each imported document's model before the editor holds
+     * it — part of the load, not an edit, so it leaves the history empty. Read on
+     * every import, like `useWorker`.
+     */
+    transformImportedModel?: (model: DocModel) => DocModel;
+    /**
      * Model used for `editor.newDocument()` and for the initial empty editor.
      *
      * @defaultValue `defaultStarterModel`
@@ -1895,6 +1901,14 @@ interface DocxEditorController {
         paragraphIndex: number;
         start: number;
         end: number;
+    }) => boolean;
+    /**
+     * THUNDER: replaces a paragraph's runs as a text edit — one undo step, or
+     * part of the last one when `coalesceKey` continues a burst of typing.
+     */
+    commitParagraphChildrenAtRange: (location: ParagraphLocation, children: ParagraphNode["children"], caret: number, options?: {
+        insertionOffset?: number;
+        coalesceKey?: string;
     }) => boolean;
     commitSectionParagraphText: (location: DocxSectionParagraphLocation, text: string) => void;
 }
@@ -2198,6 +2212,12 @@ interface DocxEditorViewerProps {
      * Call `props.runAction(action.id)` to execute built-in actions.
      */
     renderTableContextMenu?: (props: DocxTableContextMenuRenderProps) => React.ReactNode;
+    /**
+     * THUNDER: turns typed or pasted text into inline nodes — the template
+     * editor's `{{…}}` into locked fields. Return undefined to insert the text
+     * as it is.
+     */
+    inlineNodesFromText?: (text: string) => ParagraphNode["children"] | undefined;
     /**
      * Custom renderer for text, image, and table context menus.
      *
@@ -2551,7 +2571,7 @@ declare function useDocxTrackChanges(editor: Pick<DocxEditorController, "tracked
 declare function useDocxComments(editor: Pick<DocxEditorController, "comments" | "showComments" | "setShowComments" | "toggleShowComments" | "createComment" | "setCommentResolved">): UseDocxCommentsResult;
 declare function useDocxPageLayout(editor: Pick<DocxEditorController, "model">): UseDocxPageLayoutResult;
 declare function useDocxPagination(editor: Pick<DocxEditorController, "currentPage" | "totalPages">): UseDocxPaginationResult;
-declare function DocxEditorViewer({ editor, className, style, zoom, defaultZoom, onZoomChange, pageBackgroundColor, pageGapBackgroundColor, deferInitialPaginationPaint, loadingState, pageVirtualization, visiblePageRange, pageIndexes, onPageCountChange, onRequestPageReveal, headingStyles, showTrackedChanges, revisionDisplay, renderTrackedChangeCard, showComments, renderCommentCard, renderTableContextMenu, renderContextMenu, onFormFieldDoubleClick, mode, }: DocxEditorViewerProps): React.JSX.Element;
+declare function DocxEditorViewer({ editor, className, style, zoom, defaultZoom, onZoomChange, pageBackgroundColor, pageGapBackgroundColor, deferInitialPaginationPaint, loadingState, pageVirtualization, visiblePageRange, pageIndexes, onPageCountChange, onRequestPageReveal, headingStyles, showTrackedChanges, revisionDisplay, renderTrackedChangeCard, showComments, renderCommentCard, renderTableContextMenu, inlineNodesFromText, renderContextMenu, onFormFieldDoubleClick, mode, }: DocxEditorViewerProps): React.JSX.Element;
 
 declare function invalidateFontMetrics(): void;
 

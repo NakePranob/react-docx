@@ -1092,6 +1092,12 @@ interface UseDocxEditorOptions {
      */
     useWorker?: boolean | "required";
     /**
+     * THUNDER: rewrites each imported document's model before the editor holds
+     * it — part of the load, not an edit, so it leaves the history empty. Read on
+     * every import, like `useWorker`.
+     */
+    transformImportedModel?: (model: DocModel) => DocModel;
+    /**
      * Model used for `editor.newDocument()` and for the initial empty editor.
      *
      * @defaultValue `defaultStarterModel`
@@ -1309,6 +1315,14 @@ interface DocxEditorController {
         paragraphIndex: number;
         start: number;
         end: number;
+    }) => boolean;
+    /**
+     * THUNDER: replaces a paragraph's runs as a text edit — one undo step, or
+     * part of the last one when `coalesceKey` continues a burst of typing.
+     */
+    commitParagraphChildrenAtRange: (location: ParagraphLocation, children: ParagraphNode["children"], caret: number, options?: {
+        insertionOffset?: number;
+        coalesceKey?: string;
     }) => boolean;
     commitSectionParagraphText: (location: DocxSectionParagraphLocation, text: string) => void;
 }

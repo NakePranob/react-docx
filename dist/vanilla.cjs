@@ -12020,6 +12020,104 @@ function insertImageAtDropPosition(paragraph, image, childIndex, textOffset) {
   return index;
 }
 
+// src/locked-fields.ts
+init_cjs_shims();
+function isLockedField(child) {
+  return child.type === "form-field" && child.fieldType === "text" && child.widget?.enabled === false;
+}
+function lockedFieldText(field) {
+  return field.value || "\xA0";
+}
+function childEditableText(child) {
+  if (child.type === "text") {
+    return child.fieldInstruction === void 0 && !child.noteReference ? child.text : void 0;
+  }
+  if (child.type === "image") return child.floating ? "" : void 0;
+  return isLockedField(child) ? lockedFieldText(child) : void 0;
+}
+function insertedLength(nodes) {
+  return nodes.reduce(
+    (sum, node) => sum + (node.type === "text" ? node.text.length : isLockedField(node) ? lockedFieldText(node).length : 0),
+    0
+  );
+}
+function editAroundLockedFields(paragraph, text, start, end, inserted) {
+  const pieces = paragraph.children.map(childEditableText);
+  if (pieces.some((piece) => piece === void 0)) return void 0;
+  if (pieces.join("") !== text) return void 0;
+  const spans = [];
+  let offset = 0;
+  paragraph.children.forEach((child, index) => {
+    const length = pieces[index].length;
+    if (isLockedField(child)) spans.push({ start: offset, end: offset + length });
+    offset += length;
+  });
+  let editStart = Math.max(0, Math.min(start, end));
+  let editEnd = Math.min(text.length, Math.max(start, end));
+  for (const span of spans) {
+    if (editStart === editEnd) {
+      if (editStart > span.start && editStart < span.end) {
+        editStart = editEnd = span.end;
+      }
+    } else if (span.start < editEnd && span.end > editStart) {
+      editStart = Math.min(editStart, span.start);
+      editEnd = Math.max(editEnd, span.end);
+    }
+  }
+  if (spans.length === 0 && typeof inserted === "string") return void 0;
+  let insertedStyle;
+  offset = 0;
+  for (let index = 0; index < paragraph.children.length; index++) {
+    const child = paragraph.children[index];
+    const length = pieces[index].length;
+    if (child.type === "text" && offset < editStart && editStart <= offset + length) {
+      insertedStyle = child.style;
+    }
+    if (insertedStyle === void 0 && offset >= editStart && child.type !== "image") {
+      insertedStyle = child.style;
+    }
+    offset += length;
+  }
+  const insertion = typeof inserted === "string" ? inserted ? [{ type: "text", text: inserted, ...insertedStyle ? { style: { ...insertedStyle } } : {} }] : [] : inserted.map(
+    (node) => node.type !== "image" && !node.style && insertedStyle ? { ...node, style: { ...insertedStyle } } : node
+  );
+  const children = [];
+  let placed = false;
+  const place = () => {
+    if (!placed) children.push(...insertion);
+    placed = true;
+  };
+  offset = 0;
+  paragraph.children.forEach((child, index) => {
+    const piece = pieces[index];
+    const childStart = offset;
+    const childEnd = offset + piece.length;
+    offset = childEnd;
+    if (child.type === "text") {
+      if (childEnd <= editStart || childStart >= editEnd) {
+        if (childStart >= editEnd) place();
+        children.push(child);
+        if (childEnd === editStart && editStart === editEnd) place();
+        return;
+      }
+      const left = piece.slice(0, Math.max(0, editStart - childStart));
+      const right = piece.slice(Math.max(0, editEnd - childStart));
+      if (left) children.push({ ...child, text: left });
+      place();
+      if (right) children.push({ ...child, text: right });
+      return;
+    }
+    if (isLockedField(child) && childStart >= editStart && childEnd <= editEnd && childEnd > childStart) {
+      place();
+      return;
+    }
+    if (childStart >= editEnd && piece.length > 0) place();
+    children.push(child);
+  });
+  place();
+  return { children, caret: editStart + insertedLength(insertion) };
+}
+
 // ../../node_modules/.pnpm/@tanstack+react-virtual@3.14.14_react-dom@19.2.4_react@19.2.4__react@19.2.4/node_modules/@tanstack/react-virtual/dist/esm/index.js
 init_cjs_shims();
 init_compat_module();
@@ -25771,6 +25869,16 @@ function setSelectionWithinElementByTextOffsetsDom(element, startOffset, endOffs
       }
       const textLength = currentTextNode.textContent?.length ?? 0;
       if (traversed + textLength >= safeOffset) {
+        const field = currentTextNode.parentElement?.closest(
+          "[data-docx-locked-field='true']"
+        );
+        if (field?.parentNode) {
+          const index = Array.prototype.indexOf.call(field.parentNode.childNodes, field);
+          return {
+            node: field.parentNode,
+            offset: safeOffset <= traversed ? index : index + 1
+          };
+        }
         return {
           node: currentTextNode,
           offset: Math.max(0, safeOffset - traversed)
@@ -28992,7 +29100,7 @@ function resolveFloatingForImageWrapMode(mode, currentFloating, seedFloating) {
   }
 }
 function buildParagraphPretextLayoutSource(paragraph, options, typography) {
-  if (paragraph.children.some((child) => child.type === "text" && child.fieldInstruction !== void 0)) {
+  if (paragraph.children.some((child) => child.type === "text" && child.fieldInstruction !== void 0 || isLockedField(child))) {
     return void 0;
   }
   if (options?.defaultTabStopTwips !== void 0) {
@@ -43863,6 +43971,10 @@ function useDocxEditor(options = {}) {
   h2(() => {
     importUseWorkerRef.current = options.useWorker;
   }, [options.useWorker]);
+  const importTransformRef = A2(options.transformImportedModel);
+  h2(() => {
+    importTransformRef.current = options.transformImportedModel;
+  }, [options.transformImportedModel]);
   const [historyRestoreRequest, setHistoryRestoreRequest] = d2();
   const [selectionSessionKind, setSelectionSessionKind] = d2("idle");
   const modelRef = A2(model);
@@ -44696,7 +44808,7 @@ function useDocxEditor(options = {}) {
           workerEndMark
         );
         const pkg = importResult.package;
-        const nextModel = importResult.model;
+        const nextModel = importTransformRef.current?.(importResult.model) ?? importResult.model;
         markDocxImportPerformance(fontsStartMark);
         await loadEmbeddedFontsFromPackage(pkg);
         await awaitDocumentFonts(nextModel);
@@ -47877,6 +47989,46 @@ function useDocxEditor(options = {}) {
     },
     [dispatchEditorTransaction]
   );
+  const commitParagraphChildrenAtRange = q2(
+    (location, children, caret, options2) => {
+      const now2 = Date.now();
+      const coalesce = options2?.coalesceKey !== void 0 && shouldCoalesceTextCommit(textCommitBurstRef.current, {
+        key: options2.coalesceKey,
+        caretBefore: options2.insertionOffset ?? caret,
+        at: now2
+      });
+      textCommitBurstRef.current = options2?.coalesceKey !== void 0 ? { key: options2.coalesceKey, caretAfter: caret, at: now2 } : void 0;
+      return dispatchEditorTransaction((current) => {
+        const { paragraph } = getParagraphAtLocation(current.model, location);
+        if (!paragraph) {
+          return void 0;
+        }
+        const nextModel = copyModelForParagraphEdits(current.model, [location]);
+        const nextParagraph = getParagraphAtLocation(nextModel, location).paragraph;
+        if (!nextParagraph) {
+          return void 0;
+        }
+        nextParagraph.children = children;
+        nextParagraph.sourceXml = void 0;
+        const tableNode = location.kind === "table-cell" ? nextModel.nodes[location.tableIndex] : void 0;
+        if (tableNode?.type === "table") {
+          tableNode.sourceXml = void 0;
+        }
+        return {
+          model: nextModel,
+          selection: selectionFromTextRangeLocation(location),
+          activeTextRange: {
+            start: { location: cloneTextRangeLocation(location), offset: caret },
+            end: { location: cloneTextRangeLocation(location), offset: caret }
+          },
+          pushHistory: !coalesce,
+          clearSelectedFormField: true,
+          textInput: true
+        };
+      });
+    },
+    [dispatchEditorTransaction]
+  );
   const commitTableCellTextAtRange = q2(
     (tableIndex, rowIndex, cellIndex, text, caret) => {
       textCommitBurstRef.current = void 0;
@@ -48124,6 +48276,7 @@ function useDocxEditor(options = {}) {
     commitTableCellText,
     commitTableCellParagraphTextRecursive,
     commitParagraphTextAtRange,
+    commitParagraphChildrenAtRange,
     commitTableCellTextAtRange,
     commitSectionParagraphText
   };
@@ -49529,6 +49682,7 @@ function DocxEditorViewer({
   showComments,
   renderCommentCard,
   renderTableContextMenu,
+  inlineNodesFromText,
   renderContextMenu,
   onFormFieldDoubleClick,
   mode = "edit"
@@ -49545,6 +49699,8 @@ function DocxEditorViewer({
   h2(() => () => tableResizeCleanupRef.current?.(), []);
   const sourceModelRef = A2(sourceEditor.model);
   sourceModelRef.current = sourceEditor.model;
+  const inlineNodesFromTextRef = A2(inlineNodesFromText);
+  inlineNodesFromTextRef.current = inlineNodesFromText;
   const reviewDisplay = T2(
     () => showTrackedChanges ?? sourceEditor.showTrackedChanges ? reviewDisplayModel(sourceEditor.model, revisionDisplay) : { model: sourceEditor.model, rowIndexes: /* @__PURE__ */ new Map(), paragraphIndexes: /* @__PURE__ */ new Map() },
     [sourceEditor.model, sourceEditor.showTrackedChanges, showTrackedChanges, sourceEditor.trackedChanges, revisionDisplay]
@@ -58170,6 +58326,29 @@ function DocxEditorViewer({
         const targetRange = typeof event.getTargetRanges === "function" ? event.getTargetRanges()[0] : void 0;
         return targetRange ? staticRangeOffsetsWithinElementDom(element, targetRange) : void 0;
       };
+      const lockedFieldEdit = (paragraph, text, range, editIntent) => {
+        let { start, end } = range;
+        let inserted;
+        if (editIntent.kind === "insertText" || editIntent.kind === "replaceText") {
+          inserted = inlineNodesFromTextRef.current?.(editIntent.text) ?? editIntent.text;
+        } else if (editIntent.kind === "insertLineBreak") {
+          inserted = "\n";
+        } else if (editIntent.kind === "deleteRange") {
+          inserted = "";
+        } else if (editIntent.kind === "deleteContent") {
+          if (start === end) {
+            const applied2 = applyTextEditingIntent(text, start, end, editIntent);
+            const removed = applied2 ? text.length - applied2.text.length : 0;
+            if (removed <= 0) return void 0;
+            if (editIntent.direction === "backward") start -= removed;
+            else end += removed;
+          }
+          inserted = "";
+        } else {
+          return void 0;
+        }
+        return editAroundLockedFields(paragraph, text, start, end, inserted);
+      };
       const paragraphHost = targetElement.closest(
         "[data-docx-paragraph-host='true'][data-docx-paragraph-kind='paragraph']"
       );
@@ -58287,6 +58466,23 @@ function DocxEditorViewer({
           }
         }
         const rangeOffsets2 = !continuationActive2 && (intent.kind === "insertText" || intent.kind === "replaceText" || intent.kind === "insertLineBreak" || intent.kind === "deleteContent" || intent.kind === "deleteRange") ? resolveTargetRangeOffsets(paragraphHost) ?? selectionOffsets2 : selectionOffsets2;
+        const lockedEdit2 = lockedFieldEdit(node, currentText2, rangeOffsets2, intent);
+        if (lockedEdit2) {
+          editingIntentContinuationRef.current = void 0;
+          const lockedCoalesceClass = editingIntentCoalesceClass(intent);
+          editor.commitParagraphChildrenAtRange(location, lockedEdit2.children, lockedEdit2.caret, {
+            insertionOffset: rangeOffsets2.start,
+            ...lockedCoalesceClass ? { coalesceKey: `p:${nodeIndex}:${lockedCoalesceClass}` } : void 0
+          });
+          pendingEditableCaretRef.current = {
+            nodeIndex,
+            start: lockedEdit2.caret,
+            end: lockedEdit2.caret
+          };
+          focusParagraphAtOffset(nodeIndex, lockedEdit2.caret);
+          schedulePaginationMeasurementResume();
+          return;
+        }
         const applied2 = applyTextEditingIntent(
           currentText2,
           rangeOffsets2.start,
@@ -58487,6 +58683,27 @@ function DocxEditorViewer({
       }
       const effectiveIntent = intent.kind === "insertParagraph" ? { kind: "insertLineBreak" } : intent;
       const rangeOffsets = !continuationActive && (effectiveIntent.kind === "insertText" || effectiveIntent.kind === "replaceText" || effectiveIntent.kind === "insertLineBreak" || effectiveIntent.kind === "deleteContent" || effectiveIntent.kind === "deleteRange") ? resolveTargetRangeOffsets(paragraphElement) ?? selectionOffsets : selectionOffsets;
+      const lockedEdit = lockedFieldEdit(
+        cellParagraphNodes[paragraphIndex],
+        currentText,
+        rangeOffsets,
+        effectiveIntent
+      );
+      if (lockedEdit) {
+        editingIntentContinuationRef.current = void 0;
+        const lockedCoalesceClass = editingIntentCoalesceClass(effectiveIntent);
+        editor.commitParagraphChildrenAtRange(cellLocation, lockedEdit.children, lockedEdit.caret, {
+          insertionOffset: rangeOffsets.start,
+          ...lockedCoalesceClass ? { coalesceKey: `${continuationPrefix}${paragraphIndex}:${lockedCoalesceClass}` } : void 0
+        });
+        focusTableCellParagraphAtOffset(
+          `${tableIndex}:${rowIndex}:${cellIndex}`,
+          paragraphIndex,
+          lockedEdit.caret
+        );
+        schedulePaginationMeasurementResume();
+        return;
+      }
       const applied = applyTextEditingIntent(
         currentText,
         rangeOffsets.start,
@@ -58542,6 +58759,7 @@ function DocxEditorViewer({
       cancelPendingPointerSelectionReconcile,
       editor,
       focusParagraphAtOffset,
+      focusTableCellParagraphAtOffset,
       isReadOnly,
       schedulePaginationMeasurementResume,
       selectionOffsetsWithinElement,
@@ -58561,6 +58779,167 @@ function DocxEditorViewer({
       rootElement.removeEventListener("beforeinput", handleBeforeInput);
     };
   }, [handleEditableHostBeforeInput]);
+  const lockedFieldReadOnlyRef = A2(isReadOnly);
+  lockedFieldReadOnlyRef.current = isReadOnly;
+  h2(() => {
+    const rootOf = (node) => {
+      const viewerRoot = viewerRootRef.current;
+      return viewerRoot && node && viewerRoot.contains(node) ? viewerRoot : void 0;
+    };
+    const handleCopy = (event) => {
+      const domSelection = window.getSelection();
+      if (!event.clipboardData || !domSelection || domSelection.rangeCount === 0 || domSelection.isCollapsed) {
+        return;
+      }
+      const range = domSelection.getRangeAt(0);
+      if (!rootOf(range.commonAncestorContainer)) {
+        return;
+      }
+      const fragment = range.cloneContents();
+      const fields = fragment.querySelectorAll("[data-docx-locked-field='true']");
+      if (fields.length === 0) {
+        return;
+      }
+      fields.forEach((field) => {
+        field.replaceWith(field.getAttribute("data-docx-locked-source") ?? field.textContent ?? "");
+      });
+      fragment.querySelectorAll("br").forEach((lineBreak) => lineBreak.replaceWith("\n"));
+      event.clipboardData.setData("text/plain", fragment.textContent ?? "");
+      event.preventDefault();
+      if (event.type === "cut" && !lockedFieldReadOnlyRef.current) {
+        const anchor = domSelection.anchorNode;
+        const target = anchor instanceof Element ? anchor : anchor?.parentElement;
+        target?.dispatchEvent(
+          new InputEvent("beforeinput", { bubbles: true, cancelable: true, inputType: "deleteByCut" })
+        );
+      }
+    };
+    const handlePointerDown = (event) => {
+      if (lockedFieldReadOnlyRef.current || event.button !== 0 || !(event.target instanceof Element) || !rootOf(event.target)) {
+        return;
+      }
+      const field = event.target.closest("[data-docx-locked-field='true']");
+      if (!field) {
+        const host = event.target.closest("[contenteditable='true']");
+        const fieldEndingLine = host ? Array.from(host.querySelectorAll("[data-docx-locked-field='true']")).find((candidate) => {
+          const rects = candidate.getClientRects();
+          const last = rects[rects.length - 1];
+          if (!last || event.clientX < last.right || event.clientY < last.top || event.clientY > last.bottom) {
+            return false;
+          }
+          const next = candidate.nextSibling;
+          if (!next || !(next.textContent ?? "").length) return true;
+          const probe = document.createRange();
+          if (next instanceof Text) {
+            probe.setStart(next, 0);
+            probe.setEnd(next, 1);
+          } else {
+            probe.selectNode(next);
+          }
+          const nextRect = probe.getClientRects()[0];
+          return !nextRect || nextRect.top >= last.bottom - 1;
+        }) : void 0;
+        if (!host || !fieldEndingLine) {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        host.focus({ preventScroll: true });
+        const caret = document.createRange();
+        caret.setStartAfter(fieldEndingLine);
+        caret.collapse(true);
+        const domSelection = window.getSelection();
+        domSelection?.removeAllRanges();
+        domSelection?.addRange(caret);
+        return;
+      }
+      const selectField = (element) => {
+        const host = element.closest("[contenteditable='true']");
+        if (!host) return false;
+        host.focus({ preventScroll: true });
+        const range = document.createRange();
+        range.setStartBefore(element);
+        range.setEndAfter(element);
+        const domSelection = window.getSelection();
+        domSelection?.removeAllRanges();
+        domSelection?.addRange(range);
+        return true;
+      };
+      if (selectField(field)) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      const sourceId = field.getAttribute("data-docx-source-id");
+      if (!sourceId) return;
+      let frames = 0;
+      const retry = () => {
+        const drawn = viewerRootRef.current?.querySelector(
+          `[data-docx-locked-field='true'][data-docx-source-id="${CSS.escape(sourceId)}"]`
+        );
+        if (drawn && selectField(drawn) || ++frames > 30) return;
+        requestAnimationFrame(retry);
+      };
+      window.setTimeout(() => requestAnimationFrame(retry), 0);
+    };
+    const handleKeyDown = (event) => {
+      if (lockedFieldReadOnlyRef.current || event.isComposing || event.ctrlKey || event.metaKey || event.altKey) {
+        return;
+      }
+      const edits = event.key === "Backspace" || event.key === "Delete" || event.key.length === 1;
+      const domSelection = window.getSelection();
+      if (!edits || !domSelection || domSelection.rangeCount === 0 || domSelection.isCollapsed) {
+        return;
+      }
+      const range = domSelection.getRangeAt(0);
+      if (rootOf(range.commonAncestorContainer) && range.cloneContents().querySelector("[data-docx-locked-field='true']")) {
+        event.stopPropagation();
+        if (event.key === "Backspace" || event.key === "Delete") {
+          event.preventDefault();
+          const anchor = range.startContainer;
+          const target = anchor instanceof Element ? anchor : anchor.parentElement;
+          target?.dispatchEvent(
+            new InputEvent("beforeinput", {
+              bubbles: true,
+              cancelable: true,
+              inputType: event.key === "Backspace" ? "deleteContentBackward" : "deleteContentForward"
+            })
+          );
+        }
+      }
+    };
+    const handleSelectionChange = () => {
+      const domSelection = window.getSelection();
+      if (!domSelection || domSelection.rangeCount === 0 || !domSelection.isCollapsed) {
+        return;
+      }
+      const node = domSelection.anchorNode;
+      const element = node instanceof Element ? node : node?.parentElement;
+      const field = element?.closest("[data-docx-locked-field='true']");
+      if (!field || !rootOf(field)) {
+        return;
+      }
+      const atStart = domSelection.anchorOffset === 0 && (node === field || node === field.firstChild);
+      const range = document.createRange();
+      if (atStart) range.setStartBefore(field);
+      else range.setStartAfter(field);
+      range.collapse(true);
+      domSelection.removeAllRanges();
+      domSelection.addRange(range);
+    };
+    document.addEventListener("selectionchange", handleSelectionChange);
+    window.addEventListener("keydown", handleKeyDown, true);
+    window.addEventListener("copy", handleCopy, true);
+    window.addEventListener("cut", handleCopy, true);
+    window.addEventListener("pointerdown", handlePointerDown, true);
+    return () => {
+      document.removeEventListener("selectionchange", handleSelectionChange);
+      window.removeEventListener("keydown", handleKeyDown, true);
+      window.removeEventListener("copy", handleCopy, true);
+      window.removeEventListener("cut", handleCopy, true);
+      window.removeEventListener("pointerdown", handlePointerDown, true);
+    };
+  }, []);
   const resolveTableColumnWidths = q2(
     (tableIndex, table, tableWidthPx) => {
       const columnCount = tableColumnCount(table);
@@ -64170,7 +64549,41 @@ function DocxEditorViewer({
             width: compactFieldLayout ? `${compactFieldWidthPx}px` : void 0,
             boxSizing: "border-box"
           };
-          if (child.fieldType === "checkbox") {
+          if (child.fieldType === "text" && child.widget?.enabled === false) {
+            const chipText = formFieldDisplayValue2(child) || "\xA0";
+            nodes.push(
+              /* @__PURE__ */ u3(
+                "span",
+                {
+                  contentEditable: false,
+                  "data-docx-source-id": paragraph.blockId ? `${paragraph.blockId}/child/${childIndex}` : void 0,
+                  "data-docx-form-field": "true",
+                  "data-docx-form-field-child-index": childIndex,
+                  "data-docx-form-field-type": "text",
+                  "data-docx-locked-field": "true",
+                  "data-docx-locked-source": child.tag ?? chipText,
+                  title: child.title,
+                  style: {
+                    ...runStyleToCss(child.style, documentContentTheme, chipText, paragraphBaseFontSizePx(paragraph) * 72 / 96, typography),
+                    // Painted inside the line, not the font's taller box, so a
+                    // field never covers the line above or below it.
+                    backgroundImage: "linear-gradient(rgba(234, 88, 12, 0.16), rgba(234, 88, 12, 0.16))",
+                    backgroundSize: "100% 62%",
+                    backgroundPosition: "0 55%",
+                    backgroundRepeat: "no-repeat",
+                    boxDecorationBreak: "clone",
+                    WebkitBoxDecorationBreak: "clone",
+                    cursor: isReadOnly ? "default" : "pointer",
+                    userSelect: "none",
+                    whiteSpace: "pre-wrap"
+                  },
+                  children: scriptFontTextContent(chipText, child.style, runKey, paragraphBaseFontSizePx(paragraph) * 72 / 96, typography)
+                },
+                runKey
+              )
+            );
+            trackTextAdvance(chipText, child.style);
+          } else if (child.fieldType === "checkbox") {
             const checkboxSymbol = child.checked ?? child.widget?.checkbox?.defaultChecked ? child.checkedSymbol ?? "\u2612" : child.uncheckedSymbol ?? "\u2610";
             const checkboxWidthPx = resolveCheckboxFieldWidthPx(child);
             nodes.push(
