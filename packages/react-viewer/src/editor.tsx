@@ -12274,6 +12274,29 @@ function estimateWrappedLineCountForParagraph(
     }
   }
 
+  // thunder: a positive first-line indent is counted the way it renders —
+  // pretext, with the indent as a first-row exclusion
+  // (layoutParagraphPretextSource) — not by the greedy token wrap below, which
+  // breaks Thai only at spaces and counts lines the page never draws, so a
+  // contract of indented clauses broke its pages a few lines early.
+  const firstLineIndentOnly =
+    (paragraph.style?.indent?.firstLineTwips ?? 0) > 0 &&
+    !paragraph.style?.indent?.hangingTwips &&
+    !paragraph.style?.numbering &&
+    !paragraphContainsExplicitLineBreakText(paragraph);
+  if (firstLineIndentOnly && !useTabLeaderLayout && !useAnchoredTabLayout) {
+    const source = buildParagraphPretextLayoutSource(paragraph, undefined, typography);
+    const layout = source
+      ? layoutParagraphPretextSource(
+          paragraph, source, maxLineWidthPx,
+          estimateParagraphLineHeightPx(paragraph), [], undefined, typography
+        )
+      : undefined;
+    if (layout?.lineCount) {
+      return rememberLineCount(layout.lineCount);
+    }
+  }
+
   if (useTabLeaderLayout) {
     const tabLeaderLineCount = estimateTabLeaderWrappedLineCountForParagraph(
       paragraph,
