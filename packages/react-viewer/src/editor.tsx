@@ -56577,6 +56577,11 @@ export function DocxEditorViewer({
                 overflow: "clip",
                 outline: "none",
                 zIndex: 5,
+                // THUNDER: it sits 1px wide on the caret, so a click at the
+                // caret — at a line's end, say — landed on it, and the
+                // browser put its own caret at 0: the paragraph's start.
+                // Clicks are the text's; this only takes the keys.
+                pointerEvents: "none",
               }}
             />
           ) : null}
