@@ -1181,8 +1181,9 @@ function normalizeMeasuredTableRowHeightForDefinitionPx(
   }
   const declaredHeight = tableRowHeightFromDefinitionPx(table, row, rowIndex);
   if (declaredHeight === undefined) return measuredHeight;
-  if (row.style?.heightRule === "exact" && measuredHeight === Math.round(declaredHeight)) {
-    return Math.max(MIN_PARAGRAPH_LINE_HEIGHT_PX, declaredHeight);
+  if (row.style?.heightRule === "exact") {
+    // THUNDER: an exact row is as tall as it says, however short.
+    return Math.max(1, declaredHeight);
   }
   return Math.max(measuredHeight, declaredHeight);
 }
@@ -5143,6 +5144,19 @@ export interface DocxEditorViewerProps {
    * centimetres. Defaults to `"2.50 cm"`.
    */
   formatColumnWidth?: (centimetres: number) => string;
+  /**
+   * THUNDER: the model the viewer lays out and draws instead of the document's
+   * own — the template editor's "view as a case", with what a case would not
+   * print reduced to strips. It must keep the document's shape: the same
+   * nodes, rows, cells and paragraphs at the same indexes, so the places an
+   * edit names are the document's places. Edits still go to the document.
+   */
+  displayModel?: (model: DocModel) => DocModel;
+  /**
+   * THUNDER: paragraphs typing must not reach — what `displayModel` reduced to
+   * a strip, whose text on screen is not the document's.
+   */
+  isLockedParagraph?: (location: ParagraphLocation) => boolean;
   /**
    * Custom renderer for text, image, and table context menus.
    *
@@ -13695,7 +13709,8 @@ export function estimateTableRowHeightsPx(
     );
     rowHeightPx = resolvedHeight.height;
     if (resolvedHeight.exact) {
-      return Math.max(MIN_PARAGRAPH_LINE_HEIGHT_PX, rowHeightPx);
+      // THUNDER: an exact row is as tall as it says, however short.
+      return Math.max(1, rowHeightPx);
     }
     // Fallback estimates reserve extra space; measured line metrics already
     // include the font's full height and must not be inflated a second time.
@@ -14413,13 +14428,19 @@ function estimateTableHeightPx(
     undefined,
     percentageReferenceWidthPx, typography
   ).reduce(
-    (sum, rowHeightPx) =>
-      sum + Math.max(MIN_PARAGRAPH_LINE_HEIGHT_PX, rowHeightPx),
+    (sum, rowHeightPx, rowIndex) =>
+      // THUNDER: an exact row is as tall as it says, however short — the
+      // template editor folds a hidden row to one twip.
+      sum + (table.rows[rowIndex]?.style?.heightRule === "exact"
+        ? rowHeightPx
+        : Math.max(MIN_PARAGRAPH_LINE_HEIGHT_PX, rowHeightPx)),
     0
   );
 
+  const allRowsExact = table.rows.length > 0 &&
+    table.rows.every((row) => row.style?.heightRule === "exact");
   const estimatedHeightPx = Math.max(
-    MIN_PARAGRAPH_LINE_HEIGHT_PX * 2,
+    allRowsExact ? 0 : MIN_PARAGRAPH_LINE_HEIGHT_PX * 2,
     estimatedRowsHeightPx + tableMinimumRowOuterBorderExtentPx(table)
   );
   if (sourceXml) {
@@ -35499,7 +35520,25 @@ export function useDocxEditor(
         if (!nextParagraph) {
           return undefined;
         }
-        nextParagraph.children = children;
+        // A locked field keeps the document's value: the children were cut
+        // from what the viewer shows, which a display model may have drawn
+        // with other values (a sample in place of a label).
+        const sourceValues = new Map<string, string[]>();
+        for (const child of paragraph.children) {
+          if (isLockedField(child)) {
+            const key = child.tag ?? "";
+            sourceValues.set(key, [...(sourceValues.get(key) ?? []), child.value ?? ""]);
+          }
+        }
+        const used = new Map<string, number>();
+        nextParagraph.children = children.map((child) => {
+          if (!isLockedField(child)) return child;
+          const key = child.tag ?? "";
+          const nth = used.get(key) ?? 0;
+          used.set(key, nth + 1);
+          const value = sourceValues.get(key)?.[nth];
+          return value === undefined ? child : { ...child, value };
+        });
         nextParagraph.sourceXml = undefined;
         const tableNode =
           location.kind === "table-cell" ? nextModel.nodes[location.tableIndex] : undefined;
@@ -39297,6 +39336,8 @@ export function DocxEditorViewer({
   renderTableContextMenu,
   inlineNodesFromText,
   formatColumnWidth,
+  displayModel,
+  isLockedParagraph,
   renderContextMenu,
   onFormFieldDoubleClick,
   mode = "edit",
@@ -39315,6 +39356,8 @@ export function DocxEditorViewer({
   sourceModelRef.current = sourceEditor.model;
   const inlineNodesFromTextRef = React.useRef(inlineNodesFromText);
   inlineNodesFromTextRef.current = inlineNodesFromText;
+  const isLockedParagraphRef = React.useRef(isLockedParagraph);
+  isLockedParagraphRef.current = isLockedParagraph;
   const formatColumnWidthLabel = (widthPx: number): string => {
     const centimetres = (widthPx * 2.54) / 96;
     return formatColumnWidth ? formatColumnWidth(centimetres) : `${centimetres.toFixed(2)} cm`;
@@ -39322,8 +39365,12 @@ export function DocxEditorViewer({
   const reviewDisplay = React.useMemo(
     () => (showTrackedChanges ?? sourceEditor.showTrackedChanges)
       ? reviewDisplayModel(sourceEditor.model, revisionDisplay)
-      : { model: sourceEditor.model, rowIndexes: new Map<number, number[]>(), paragraphIndexes: new Map<number, number>() },
-    [sourceEditor.model, sourceEditor.showTrackedChanges, showTrackedChanges, sourceEditor.trackedChanges, revisionDisplay]
+      : {
+          model: displayModel ? displayModel(sourceEditor.model) : sourceEditor.model,
+          rowIndexes: new Map<number, number[]>(),
+          paragraphIndexes: new Map<number, number>(),
+        },
+    [sourceEditor.model, sourceEditor.showTrackedChanges, showTrackedChanges, sourceEditor.trackedChanges, revisionDisplay, displayModel]
   );
   const tabLayoutModel = React.useMemo(
     () => documentWithDefaultTabLayout(documentWithPhysicalTableGrids(reviewDisplay.model)),
@@ -40369,12 +40416,15 @@ export function DocxEditorViewer({
     [documentLayout, documentSections, editor.model, fontMetricsRevision, editor.model.metadata.compatibility?.evenAndOddHeaders, typography?.enableOpenTypeFeatures, typography?.adjustLineHeightInTable]
   );
   const precomputedPaginationMetrics = React.useMemo(() => {
-    if (editor.isImporting || hasVisibleTrackedDeletions || headingStyles ||
+    // THUNDER: a display model's strips are sized by the screen, not by the
+    // estimate this makes from the model; measure the drawn page instead.
+    if (displayModel ||
+      editor.isImporting || hasVisibleTrackedDeletions || headingStyles ||
       Object.keys(tableColumnWidths).length > 0 || Object.keys(tableRowHeights).length > 0 ||
       activeColumnResize || activeRowResize || activeTableResize) return undefined;
     return resolvePrecomputedPaginationMetrics(editor.model, documentSections,
       paginationSectionMetrics, typography);
-  }, [editor.model, editor.isImporting, documentSections, paginationSectionMetrics, typography,
+  }, [editor.model, editor.isImporting, documentSections, paginationSectionMetrics, typography, displayModel,
     hasVisibleTrackedDeletions, headingStyles, tableColumnWidths, tableRowHeights,
     activeColumnResize, activeRowResize, activeTableResize, fontMetricsRevision]);
   const usesPrecomputedPagination = precomputedPaginationMetrics !== undefined;
@@ -51118,6 +51168,10 @@ export function DocxEditorViewer({
         }
 
         event.preventDefault();
+        // THUNDER: a strip of the display model is not the paragraph's text.
+        if (isLockedParagraphRef.current?.({ kind: "paragraph", nodeIndex })) {
+          return;
+        }
         cancelPendingPointerSelectionReconcile();
         if (intent.kind === "blocked") {
           return;
@@ -51498,6 +51552,9 @@ export function DocxEditorViewer({
         cellIndex,
         paragraphIndex,
       };
+      if (isLockedParagraphRef.current?.(cellLocation)) {
+        return;
+      }
       const currentText =
         continuationActive && continuation
           ? continuation.text
@@ -52059,7 +52116,11 @@ export function DocxEditorViewer({
       };
       const preserveAutomaticBorderFractions = tableAutomaticCollapsedBorderWidthPx(node) > 0;
       const normalizeRowMeasurement = (heightPx: number, rowIndex: number): number =>
-        preserveAutomaticBorderFractions
+        // THUNDER: an exact row is as tall as it says, however short — the
+        // 14px floor would count a row folded to one twip as a line.
+        node.rows[rowIndex]?.style?.heightRule === "exact" && Number.isFinite(heightPx) && heightPx > 0
+          ? Math.max(1, Math.round(heightPx))
+          : preserveAutomaticBorderFractions
           ? normalizeMeasuredTableRowHeightForDefinitionPx(heightPx, node, rowIndex)
           : normalizeMeasuredTableRowHeightPx(heightPx);
       const recordMeasuredRow = (rowIndex: number, rowHeightPx: number) => {
