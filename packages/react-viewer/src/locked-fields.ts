@@ -159,3 +159,73 @@ export function editAroundLockedFields(
 
   return { children, caret: editStart + insertedLength(insertion) };
 }
+
+/**
+ * Offsets in the text a paragraph is drawn with, moved onto the document's
+ * own paragraph of the same shape: a display model may draw a field with
+ * another value (a sample in place of a label), so the drawn text and the
+ * document's text differ in length wherever a field is. An offset inside a
+ * field goes after it. Undefined when the two do not have the same children.
+ */
+export function offsetsInSource(
+  drawn: ParagraphNode,
+  source: ParagraphNode,
+  offsets: number[]
+): { text: string; offsets: number[] } | undefined {
+  if (drawn.children.length !== source.children.length) return undefined;
+  const drawnPieces = drawn.children.map(childEditableText);
+  const sourcePieces = source.children.map(childEditableText);
+  if ([...drawnPieces, ...sourcePieces].some((piece) => piece === undefined)) return undefined;
+  const moved = offsets.map((offset) => {
+    let drawnAt = 0;
+    let sourceAt = 0;
+    for (let index = 0; index < drawnPieces.length; index++) {
+      const drawnLength = (drawnPieces[index] as string).length;
+      const sourceLength = (sourcePieces[index] as string).length;
+      if (offset <= drawnAt + drawnLength) {
+        if (isLockedField(drawn.children[index])) {
+          return offset === drawnAt ? sourceAt : sourceAt + sourceLength;
+        }
+        return sourceAt + Math.min(offset - drawnAt, sourceLength);
+      }
+      drawnAt += drawnLength;
+      sourceAt += sourceLength;
+    }
+    return sourceAt;
+  });
+  return { text: sourcePieces.join(""), offsets: moved };
+}
+
+/**
+ * A paragraph that holds a locked field cut in two at `[start, end)` of its
+ * editable text (what is between goes), the way Enter splits it. A field
+ * goes whole to the side it starts on; an offset inside one moves after it.
+ * Undefined when the paragraph holds no field, or a child this mapping
+ * cannot place — the ordinary split then takes it.
+ */
+export function splitAroundLockedFields(
+  paragraph: ParagraphNode,
+  start: number,
+  end: number
+): { before: ParagraphChild[]; after: ParagraphChild[] } | undefined {
+  if (!paragraph.children.some(isLockedField)) return undefined;
+  const pieces = paragraph.children.map(childEditableText);
+  if (pieces.some((piece) => piece === undefined)) return undefined;
+  const before: ParagraphChild[] = [];
+  const after: ParagraphChild[] = [];
+  let offset = 0;
+  paragraph.children.forEach((child, index) => {
+    const length = (pieces[index] as string).length;
+    const childStart = offset;
+    offset += length;
+    if (child.type !== "text") {
+      (childStart < start || (childStart === start && length === 0) ? before : after).push(child);
+      return;
+    }
+    const head = child.text.slice(0, Math.max(0, start - childStart));
+    const tail = child.text.slice(Math.max(0, end - childStart));
+    if (childStart < start && head) before.push({ ...child, text: head });
+    if (childStart + length > end && tail) after.push({ ...child, text: tail });
+  });
+  return { before, after };
+}

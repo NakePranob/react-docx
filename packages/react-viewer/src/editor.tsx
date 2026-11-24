@@ -45,7 +45,7 @@ import {
   useViewerZoom,
 } from "./viewer-zoom";
 import { copyModelForParagraphEdits, imageDropPositionAtTextOffset, insertImageAtDropPosition } from "./image-drop";
-import { editAroundLockedFields, isLockedField, lockedFieldText } from "./locked-fields";
+import { editAroundLockedFields, isLockedField, lockedFieldText, offsetsInSource, splitAroundLockedFields } from "./locked-fields";
 import { renderToStaticMarkup } from "react-dom/server";
 import { useVirtualizer, useWindowVirtualizer } from "@tanstack/react-virtual";
 import {
@@ -5912,6 +5912,29 @@ function formFieldDisplayValue(field: FormFieldRunNode): string {
     default:
       return field.value ?? "";
   }
+}
+
+/**
+ * THUNDER: the text and offsets an Enter splits at, in the document's own
+ * paragraph. The viewer draws a display model, where a field may show a
+ * sample in place of its value; split as the document's, that drawn text put
+ * the sample into the paragraph as plain text.
+ */
+function splitInSource(
+  drawn: DocNode | undefined,
+  source: DocNode | undefined,
+  text: string,
+  start: number,
+  end: number
+): [string, number, number] {
+  const moved =
+    drawn?.type === "paragraph" &&
+    source?.type === "paragraph" &&
+    drawn !== source &&
+    drawn.children.some(isLockedField)
+      ? offsetsInSource(drawn, source, [start, end])
+      : undefined;
+  return moved ? [moved.text, moved.offsets[0], moved.offsets[1]] : [text, start, end];
 }
 
 function firstRunStyle(paragraph?: ParagraphNode): TextRunNode["style"] {
@@ -33802,27 +33825,64 @@ export function useDocxEditor(
               paragraphNode.style,
               paragraphNode.sourceXml
             );
+        // THUNDER: a pending style (a toolbar toggle at a collapsed caret)
+        // is laid over the text's own style, not in place of it — on its own
+        // it held only what was toggled, and the new paragraph lost its font
+        // and size.
+        const atStart =
+          firstTextStyleAtOffset(paragraphNode, safeStart, true) ??
+          firstRunStyle(paragraphNode);
+        const atEnd =
+          firstTextStyleAtOffset(paragraphNode, safeEnd, false) ??
+          firstRunStyle(paragraphNode);
         const beforeInsertedStyle = cloneTextStyle(
-          pendingRunStyle ??
-            firstTextStyleAtOffset(paragraphNode, safeStart, true) ??
-            firstRunStyle(paragraphNode)
+          pendingRunStyle ? { ...atStart, ...pendingRunStyle } : atStart
         );
         const inheritedRunStyle =
           cloneTextStyle(
-            pendingRunStyle ??
-              firstTextStyleAtOffset(paragraphNode, safeEnd, false) ??
-              firstRunStyle(paragraphNode)
+            pendingRunStyle ? { ...atEnd, ...pendingRunStyle } : atEnd
           ) ?? {};
-        const splitChildren = splitParagraphChildrenAtTextOffsets(
-          paragraphNode,
-          normalizedDraftText,
-          safeStart,
-          safeEnd,
-          {
-            beforeInsertedStyle,
-            afterInsertedStyle: inheritedRunStyle,
-          }
-        );
+        // THUNDER: a paragraph that holds a locked field splits by its own
+        // children — the ordinary split finds a field again by searching for
+        // its value in the text, missed a variable's, and put it first.
+        const aroundFields = splitAroundLockedFields(paragraphNode, safeStart, safeEnd);
+        const splitChildren = aroundFields
+          ? {
+              beforeChildren: aroundFields.before.length
+                ? aroundFields.before
+                : [{ type: "text" as const, text: "", ...(beforeInsertedStyle ? { style: beforeInsertedStyle } : {}) }],
+              afterChildren: aroundFields.after.length
+                ? aroundFields.after
+                : [{ type: "text" as const, text: "", ...(Object.keys(inheritedRunStyle).length ? { style: inheritedRunStyle } : {}) }],
+            }
+          : splitParagraphChildrenAtTextOffsets(
+              paragraphNode,
+              normalizedDraftText,
+              safeStart,
+              safeEnd,
+              {
+                beforeInsertedStyle,
+                afterInsertedStyle: inheritedRunStyle,
+              }
+            );
+
+        // An empty half is one empty run, in the style of the paragraph's
+        // first run — on a new document an unstyled one, so the line Enter
+        // made typed in the default font and size. It takes the style at
+        // the caret instead, as typing would.
+        const styledEmpty = (
+          children: ParagraphNode["children"],
+          style: TextRunNode["style"]
+        ): ParagraphNode["children"] =>
+          children.length === 1 &&
+          children[0].type === "text" &&
+          children[0].text === "" &&
+          style &&
+          Object.keys(style).length > 0
+            ? [{ ...children[0], style: cloneTextStyle(style) }]
+            : children;
+        splitChildren.beforeChildren = styledEmpty(splitChildren.beforeChildren, beforeInsertedStyle);
+        splitChildren.afterChildren = styledEmpty(splitChildren.afterChildren, inheritedRunStyle);
 
         const originalEnding = paragraphMarkPropertiesFromTemplate(
           paragraphNode,
@@ -47235,6 +47295,12 @@ export function DocxEditorViewer({
     [editor.model, focusWrappedParagraphTextarea, isReadOnly, syncWrappedParagraphRange, typography?.enableOpenTypeFeatures, typography?.adjustLineHeightInTable]
   );
 
+  // thunder: the latest focusWrappedParagraphRange, for focus attempts that
+  // run frames after a model change — the one they closed over still reads
+  // the model from before it, where a paragraph Enter just made is missing.
+  const focusWrappedParagraphRangeRef = React.useRef(focusWrappedParagraphRange);
+  focusWrappedParagraphRangeRef.current = focusWrappedParagraphRange;
+
   React.useLayoutEffect(() => {
     const boundary = pendingRootCaretFocusRef.current;
     pendingRootCaretFocusRef.current = undefined;
@@ -50031,8 +50097,11 @@ export function DocxEditorViewer({
 
   const focusParagraphAtOffset = React.useCallback(
     (paragraphIndex: number, offset: number): void => {
+      // THUNDER: up to 30 frames, not 6 — a paragraph Enter puts on a new
+      // page is drawn only once the pages are measured again, and the
+      // keystrokes after it went nowhere.
       const focusAttempt = (attempt: number): void => {
-        if (focusWrappedParagraphRange(
+        if (focusWrappedParagraphRangeRef.current(
           { kind: "paragraph", nodeIndex: paragraphIndex },
           offset
         )) {
@@ -50043,7 +50112,7 @@ export function DocxEditorViewer({
           offset
         );
         if (!element || !element.isConnected) {
-          if (attempt < 6) {
+          if (attempt < 30) {
             window.requestAnimationFrame(() => {
               focusAttempt(attempt + 1);
             });
@@ -50071,7 +50140,7 @@ export function DocxEditorViewer({
             element.contains(range.startContainer) &&
             element.contains(range.endContainer)
         );
-        if (!selectionInsideElement && attempt < 6) {
+        if (!selectionInsideElement && attempt < 30) {
           window.requestAnimationFrame(() => {
             focusAttempt(attempt + 1);
           });
@@ -50155,6 +50224,34 @@ export function DocxEditorViewer({
       );
     },
     [focusParagraphAtOffset, focusTableCellParagraphAtOffset]
+  );
+
+  // THUNDER: Backspace or Delete in an empty body paragraph beside a table
+  // takes the paragraph out — there is no text to join it to, so the keys
+  // did nothing, and two tables could not be put one straight under the
+  // other. The document's last paragraph stays.
+  const removeEmptyParagraphBesideTable = React.useCallback(
+    (nodeIndex: number): boolean => {
+      const nodes = editor.model.nodes;
+      const node = nodes[nodeIndex];
+      if (
+        isReadOnly ||
+        node?.type !== "paragraph" ||
+        paragraphText(node) !== "" ||
+        node.children.some((child) => child.type !== "text") ||
+        nodeIndex >= nodes.length - 1 ||
+        (nodes[nodeIndex - 1]?.type !== "table" && nodes[nodeIndex + 1]?.type !== "table")
+      ) {
+        return false;
+      }
+      setActiveWrappedParagraphSession(undefined);
+      editor.applyModelChange((current) => ({
+        ...current,
+        nodes: current.nodes.filter((_, index) => index !== nodeIndex),
+      }));
+      return true;
+    },
+    [editor, isReadOnly]
   );
 
   React.useLayoutEffect(() => {
@@ -51279,10 +51376,11 @@ export function DocxEditorViewer({
             }
             return;
           }
+          // THUNDER: split the document's paragraph, not the drawn one — a
+          // field drawn with a sample value was copied into the paragraph
+          // as text when its drawn text was split as the document's.
           const splitParagraph = editor.splitParagraphAtSelection(
-            currentText,
-            start,
-            end,
+            ...splitInSource(node, sourceModelRef.current.nodes[nodeIndex], currentText, start, end),
             location
           );
           if (splitParagraph !== undefined) {
@@ -55639,6 +55737,7 @@ export function DocxEditorViewer({
               onChange={(event) => {
                 cancelPendingPointerSelectionReconcile();
                 const edit = wrappedTextareaEdit(event.currentTarget);
+                const inputHint = wrappedParagraphInputHintRef.current;
                 wrappedParagraphInputHintRef.current = undefined;
                 const nextText = edit.source;
                 const nextStart = edit.sourceSelectionStart;
@@ -55662,6 +55761,81 @@ export function DocxEditorViewer({
                 editor.beginSelectionSession("keyboard", {
                   settleAfterMs: 220,
                 });
+                // THUNDER: text `inlineNodesFromText` recognises goes in as
+                // nodes here too, as it does on the contenteditable path — a
+                // paragraph with no field yet is edited through this textarea,
+                // and the first variable put into it stayed plain text, or
+                // (from the template editor's panel) never went in at all.
+                // Before this commit the session still holds the old text;
+                // an insert from script raises no React beforeinput hint.
+                const hintHere = inputHint?.locationKey === locationKey ? inputHint : undefined;
+                if (!/^(delete|history)/.test(hintHere?.hint.inputType ?? "")) {
+                  const before = hintHere?.source ?? wrappedSessionSourceText();
+                  let head = 0;
+                  while (
+                    head < before.length &&
+                    head < nextText.length &&
+                    before[head] === nextText[head]
+                  ) {
+                    head += 1;
+                  }
+                  let tail = 0;
+                  while (
+                    tail < before.length - head &&
+                    tail < nextText.length - head &&
+                    before[before.length - 1 - tail] === nextText[nextText.length - 1 - tail]
+                  ) {
+                    tail += 1;
+                  }
+                  const insertedText = nextText.slice(head, nextText.length - tail);
+                  const nodes = insertedText
+                    ? inlineNodesFromTextRef.current?.(insertedText)
+                    : undefined;
+                  const paragraph = nodes
+                    ? getParagraphAtLocation(editor.model, location).paragraph
+                    : undefined;
+                  const placed = paragraph && nodes
+                    ? editAroundLockedFields(paragraph, before, head, before.length - tail, nodes)
+                    : undefined;
+                  if (
+                    placed &&
+                    editor.commitParagraphChildrenAtRange(location, placed.children, placed.caret)
+                  ) {
+                    // The paragraph now holds a field, so it is edited in
+                    // place: the caret goes there, after what went in.
+                    // `tail` characters follow the insert and are unchanged;
+                    // the field may be drawn with a display value of another
+                    // length (a sample in ดูแบบเคส), so the caret is counted
+                    // back from the end of what is drawn once it has drawn.
+                    setActiveWrappedParagraphSession(undefined);
+                    const placeAfterInsert = (attempt: number): void => {
+                      const drawn = resolveParagraphHostElement(location);
+                      if (!drawn?.closest("[contenteditable='true']")) {
+                        if (attempt < 8) {
+                          window.requestAnimationFrame(() => placeAfterInsert(attempt + 1));
+                        }
+                        return;
+                      }
+                      const offset = Math.max(0, (drawn.textContent ?? "").length - tail);
+                      if (location.kind === "paragraph") {
+                        pendingEditableCaretRef.current = {
+                          nodeIndex: location.nodeIndex,
+                          start: offset,
+                          end: offset,
+                        };
+                      }
+                      // In what is drawn, as the contenteditable path keeps it.
+                      editor.setActiveTextRange({
+                        start: { location: cloneTextRangeLocation(location), offset },
+                        end: { location: cloneTextRangeLocation(location), offset },
+                      });
+                      focusParagraphLocationAtOffset(location, offset);
+                    };
+                    window.requestAnimationFrame(() => placeAfterInsert(0));
+                    schedulePaginationMeasurementResume();
+                    return;
+                  }
+                }
                 commitWrappedParagraphTextAtLocation(location, nextText);
                 syncWrappedParagraphRange(location, nextStart, nextEnd, {
                   textOverride: nextText,
@@ -55955,6 +56129,19 @@ export function DocxEditorViewer({
                     undefined,
                     backwards ? "upstream" : "downstream"
                   );
+                  return;
+                }
+
+                if (
+                  isPlainNavigation &&
+                  !event.shiftKey &&
+                  isCollapsedSelection &&
+                  (event.key === "Backspace" || event.key === "Delete") &&
+                  location.kind === "paragraph" &&
+                  currentText === "" &&
+                  removeEmptyParagraphBesideTable(location.nodeIndex)
+                ) {
+                  event.preventDefault();
                   return;
                 }
 
@@ -61578,6 +61765,17 @@ export function DocxEditorViewer({
             if (
               isPlainBackspaceOrDelete &&
               isCollapsedSelection &&
+              collapsedSelectionOffset === 0 &&
+              removeEmptyParagraphBesideTable(nodeIndex)
+            ) {
+              event.preventDefault();
+              event.stopPropagation();
+              return;
+            }
+
+            if (
+              isPlainBackspaceOrDelete &&
+              isCollapsedSelection &&
               collapsedSelectionOffset >= 0
             ) {
               if (event.key === "Backspace" && collapsedSelectionOffset === 0) {
@@ -61781,9 +61979,13 @@ export function DocxEditorViewer({
               tableCellDraftsRef.current.clear();
               tableCellParagraphDraftsRef.current.clear();
               const splitParagraph = editor.splitParagraphAtSelection(
-                currentText,
-                start,
-                end,
+                ...splitInSource(
+                  editor.model.nodes[nodeIndex],
+                  sourceModelRef.current.nodes[nodeIndex],
+                  currentText,
+                  start,
+                  end
+                ),
                 {
                   kind: "paragraph",
                   nodeIndex,
