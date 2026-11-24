@@ -5139,6 +5139,11 @@ export interface DocxEditorViewerProps {
    */
   inlineNodesFromText?: (text: string) => ParagraphNode["children"] | undefined;
   /**
+   * THUNDER: how a column's width reads while its border is dragged, given
+   * centimetres. Defaults to `"2.50 cm"`.
+   */
+  formatColumnWidth?: (centimetres: number) => string;
+  /**
    * Custom renderer for text, image, and table context menus.
    *
    * Call `props.closeMenu()` after handling a custom action.
@@ -39291,6 +39296,7 @@ export function DocxEditorViewer({
   renderCommentCard,
   renderTableContextMenu,
   inlineNodesFromText,
+  formatColumnWidth,
   renderContextMenu,
   onFormFieldDoubleClick,
   mode = "edit",
@@ -39309,6 +39315,10 @@ export function DocxEditorViewer({
   sourceModelRef.current = sourceEditor.model;
   const inlineNodesFromTextRef = React.useRef(inlineNodesFromText);
   inlineNodesFromTextRef.current = inlineNodesFromText;
+  const formatColumnWidthLabel = (widthPx: number): string => {
+    const centimetres = (widthPx * 2.54) / 96;
+    return formatColumnWidth ? formatColumnWidth(centimetres) : `${centimetres.toFixed(2)} cm`;
+  };
   const reviewDisplay = React.useMemo(
     () => (showTrackedChanges ?? sourceEditor.showTrackedChanges)
       ? reviewDisplayModel(sourceEditor.model, revisionDisplay)
@@ -52402,8 +52412,10 @@ export function DocxEditorViewer({
       target = child;
     }
     return { target: { tableIndex, path }, expectedTarget: target, address,
-      marked: Boolean(target.style?.collapsedGridColumns?.length) ||
-        Boolean(target.blockId && featureCanonicalTableIdsRef.current.has(target.blockId)),
+      // THUNDER: every table's drag commits to the model, so it is one undoable
+      // step and what is saved; upstream did so only for tables it had
+      // already canonicalised, and kept the rest in view state.
+      marked: true,
       signature: JSON.stringify([target.style?.columnWidthsTwips, target.style?.collapsedGridColumns,
         target.rows.map((row) => [row.style?.heightTwips, row.style?.heightRule])]),
       resolvedBorderSpacingPx: resolveTableSeparateBorderSpacingPx(target) };
@@ -64410,6 +64422,29 @@ export function DocxEditorViewer({
                                 : "transparent",
                             }}
                           />
+                          {isResizing ? (
+                            // THUNDER: the two columns' widths while dragging.
+                            <span
+                              data-docx-thumbnail-exclude="true"
+                              style={{
+                                position: "absolute",
+                                left: "50%",
+                                top: -22,
+                                transform: "translateX(-50%)",
+                                whiteSpace: "nowrap",
+                                pointerEvents: "none",
+                                font: "11px/16px system-ui, sans-serif",
+                                color: "#ffffff",
+                                backgroundColor: "#1e293b",
+                                borderRadius: 3,
+                                padding: "1px 6px",
+                              }}
+                            >
+                              {formatColumnWidthLabel(columnWidthsPx[boundaryColumnIndex] ?? 0)}
+                              {" | "}
+                              {formatColumnWidthLabel(columnWidthsPx[boundaryColumnIndex + 1] ?? 0)}
+                            </span>
+                          ) : null}
                         </span>
                       );
                     })
