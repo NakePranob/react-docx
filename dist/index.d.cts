@@ -2219,6 +2219,11 @@ interface DocxEditorViewerProps {
      */
     inlineNodesFromText?: (text: string) => ParagraphNode["children"] | undefined;
     /**
+     * THUNDER: how a column's width reads while its border is dragged, given
+     * centimetres. Defaults to `"2.50 cm"`.
+     */
+    formatColumnWidth?: (centimetres: number) => string;
+    /**
      * Custom renderer for text, image, and table context menus.
      *
      * Call `props.closeMenu()` after handling a custom action.
@@ -2571,7 +2576,7 @@ declare function useDocxTrackChanges(editor: Pick<DocxEditorController, "tracked
 declare function useDocxComments(editor: Pick<DocxEditorController, "comments" | "showComments" | "setShowComments" | "toggleShowComments" | "createComment" | "setCommentResolved">): UseDocxCommentsResult;
 declare function useDocxPageLayout(editor: Pick<DocxEditorController, "model">): UseDocxPageLayoutResult;
 declare function useDocxPagination(editor: Pick<DocxEditorController, "currentPage" | "totalPages">): UseDocxPaginationResult;
-declare function DocxEditorViewer({ editor, className, style, zoom, defaultZoom, onZoomChange, pageBackgroundColor, pageGapBackgroundColor, deferInitialPaginationPaint, loadingState, pageVirtualization, visiblePageRange, pageIndexes, onPageCountChange, onRequestPageReveal, headingStyles, showTrackedChanges, revisionDisplay, renderTrackedChangeCard, showComments, renderCommentCard, renderTableContextMenu, inlineNodesFromText, renderContextMenu, onFormFieldDoubleClick, mode, }: DocxEditorViewerProps): React.JSX.Element;
+declare function DocxEditorViewer({ editor, className, style, zoom, defaultZoom, onZoomChange, pageBackgroundColor, pageGapBackgroundColor, deferInitialPaginationPaint, loadingState, pageVirtualization, visiblePageRange, pageIndexes, onPageCountChange, onRequestPageReveal, headingStyles, showTrackedChanges, revisionDisplay, renderTrackedChangeCard, showComments, renderCommentCard, renderTableContextMenu, inlineNodesFromText, formatColumnWidth, renderContextMenu, onFormFieldDoubleClick, mode, }: DocxEditorViewerProps): React.JSX.Element;
 
 declare function invalidateFontMetrics(): void;
 

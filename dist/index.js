@@ -45127,6 +45127,7 @@ function DocxEditorViewer({
   renderCommentCard,
   renderTableContextMenu,
   inlineNodesFromText,
+  formatColumnWidth,
   renderContextMenu,
   onFormFieldDoubleClick,
   mode = "edit"
@@ -45145,6 +45146,10 @@ function DocxEditorViewer({
   sourceModelRef.current = sourceEditor.model;
   const inlineNodesFromTextRef = React9.useRef(inlineNodesFromText);
   inlineNodesFromTextRef.current = inlineNodesFromText;
+  const formatColumnWidthLabel = (widthPx) => {
+    const centimetres = widthPx * 2.54 / 96;
+    return formatColumnWidth ? formatColumnWidth(centimetres) : `${centimetres.toFixed(2)} cm`;
+  };
   const reviewDisplay = React9.useMemo(
     () => showTrackedChanges ?? sourceEditor.showTrackedChanges ? reviewDisplayModel(sourceEditor.model, revisionDisplay) : { model: sourceEditor.model, rowIndexes: /* @__PURE__ */ new Map(), paragraphIndexes: /* @__PURE__ */ new Map() },
     [sourceEditor.model, sourceEditor.showTrackedChanges, showTrackedChanges, sourceEditor.trackedChanges, revisionDisplay]
@@ -54832,7 +54837,10 @@ function DocxEditorViewer({
       target: { tableIndex, path },
       expectedTarget: target,
       address,
-      marked: Boolean(target.style?.collapsedGridColumns?.length) || Boolean(target.blockId && featureCanonicalTableIdsRef.current.has(target.blockId)),
+      // THUNDER: every table's drag commits to the model, so it is one undoable
+      // step and what is saved; upstream did so only for tables it had
+      // already canonicalised, and kept the rest in view state.
+      marked: true,
       signature: JSON.stringify([
         target.style?.columnWidthsTwips,
         target.style?.collapsedGridColumns,
@@ -64178,7 +64186,7 @@ ${currentText.slice(end)}`;
               const isResizing = isColumnHandleActive && activeColumnResize?.boundaryColumnIndex === boundaryColumnIndex;
               const isHovered = hoveredTableResizeHandle?.tableIndex === nodeIndex && hoveredTableResizeHandle?.kind === "column" && hoveredTableResizeHandle.boundaryIndex === boundaryColumnIndex;
               const isHot = isResizing || isHovered;
-              return /* @__PURE__ */ jsx6(
+              return /* @__PURE__ */ jsxs3(
                 "span",
                 {
                   "data-docx-table-resize-handle": "column",
@@ -64257,20 +64265,49 @@ ${currentText.slice(end)}`;
                     );
                     setHoveredTableResizeHandle(void 0);
                   },
-                  children: /* @__PURE__ */ jsx6(
-                    "span",
-                    {
-                      style: {
-                        position: "absolute",
-                        left: "50%",
-                        top: 0,
-                        transform: "translateX(-50%)",
-                        width: TABLE_RESIZE_BORDER_SIZE,
-                        height: "100%",
-                        backgroundColor: isHot ? "#3b82f6" : "transparent"
+                  children: [
+                    /* @__PURE__ */ jsx6(
+                      "span",
+                      {
+                        style: {
+                          position: "absolute",
+                          left: "50%",
+                          top: 0,
+                          transform: "translateX(-50%)",
+                          width: TABLE_RESIZE_BORDER_SIZE,
+                          height: "100%",
+                          backgroundColor: isHot ? "#3b82f6" : "transparent"
+                        }
                       }
-                    }
-                  )
+                    ),
+                    isResizing ? (
+                      // THUNDER: the two columns' widths while dragging.
+                      /* @__PURE__ */ jsxs3(
+                        "span",
+                        {
+                          "data-docx-thumbnail-exclude": "true",
+                          style: {
+                            position: "absolute",
+                            left: "50%",
+                            top: -22,
+                            transform: "translateX(-50%)",
+                            whiteSpace: "nowrap",
+                            pointerEvents: "none",
+                            font: "11px/16px system-ui, sans-serif",
+                            color: "#ffffff",
+                            backgroundColor: "#1e293b",
+                            borderRadius: 3,
+                            padding: "1px 6px"
+                          },
+                          children: [
+                            formatColumnWidthLabel(columnWidthsPx[boundaryColumnIndex] ?? 0),
+                            " | ",
+                            formatColumnWidthLabel(columnWidthsPx[boundaryColumnIndex + 1] ?? 0)
+                          ]
+                        }
+                      )
+                    ) : null
+                  ]
                 },
                 `column-border-${nodeIndex}-${boundaryColumnIndex}`
               );
