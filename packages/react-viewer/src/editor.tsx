@@ -63280,6 +63280,10 @@ export function DocxEditorViewer({
                                   y: event.clientY,
                                 });
 
+                                // THUNDER: from an empty cell too, a drag that
+                                // reaches another cell selects the cells (as it
+                                // does from a cell's text) — a new table's
+                                // cells could not be merged until typed in.
                                 beginTableCellSelectionDrag(
                                   event.pointerId,
                                   {
@@ -63289,7 +63293,8 @@ export function DocxEditorViewer({
                                   },
                                   event.clientX,
                                   event.clientY,
-                                  startBoundary
+                                  startBoundary,
+                                  true
                                 );
 
                                 const pendingFocusBoundary =
