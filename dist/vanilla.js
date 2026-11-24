@@ -23591,8 +23591,8 @@ function normalizeMeasuredTableRowHeightForDefinitionPx(heightPx, table, rowInde
   }
   const declaredHeight = tableRowHeightFromDefinitionPx(table, row, rowIndex);
   if (declaredHeight === void 0) return measuredHeight;
-  if (row.style?.heightRule === "exact" && measuredHeight === Math.round(declaredHeight)) {
-    return Math.max(MIN_PARAGRAPH_LINE_HEIGHT_PX, declaredHeight);
+  if (row.style?.heightRule === "exact") {
+    return Math.max(1, declaredHeight);
   }
   return Math.max(measuredHeight, declaredHeight);
 }
@@ -30731,7 +30731,7 @@ function estimateTableRowHeightsPx(table, maxAvailableWidthPx, numberingDefiniti
     );
     rowHeightPx = resolvedHeight.height;
     if (resolvedHeight.exact) {
-      return Math.max(MIN_PARAGRAPH_LINE_HEIGHT_PX, rowHeightPx);
+      return Math.max(1, rowHeightPx);
     }
     const paginationPaddingRatio = hasMeasuredFontMetrics ? 1 : table.rows.length >= 35 ? 1.32 : table.rows.length >= TABLE_ROW_HEIGHT_PAGINATION_ESTIMATE_PADDING_MIN_ROWS ? TABLE_ROW_HEIGHT_PAGINATION_ESTIMATE_PADDING_RATIO : 1;
     const paddedRowHeightPx = paginationPaddingRatio > 1 ? Math.round(rowHeightPx * paginationPaddingRatio) : rowHeightPx;
@@ -31250,11 +31250,16 @@ function estimateTableHeightPx(table, maxAvailableWidthPx, numberingDefinitions,
     percentageReferenceWidthPx,
     typography
   ).reduce(
-    (sum, rowHeightPx) => sum + Math.max(MIN_PARAGRAPH_LINE_HEIGHT_PX, rowHeightPx),
+    (sum, rowHeightPx, rowIndex) => (
+      // THUNDER: an exact row is as tall as it says, however short — the
+      // template editor folds a hidden row to one twip.
+      sum + (table.rows[rowIndex]?.style?.heightRule === "exact" ? rowHeightPx : Math.max(MIN_PARAGRAPH_LINE_HEIGHT_PX, rowHeightPx))
+    ),
     0
   );
+  const allRowsExact = table.rows.length > 0 && table.rows.every((row) => row.style?.heightRule === "exact");
   const estimatedHeightPx = Math.max(
-    MIN_PARAGRAPH_LINE_HEIGHT_PX * 2,
+    allRowsExact ? 0 : MIN_PARAGRAPH_LINE_HEIGHT_PX * 2,
     estimatedRowsHeightPx + tableMinimumRowOuterBorderExtentPx(table)
   );
   if (sourceXml) {
@@ -46010,7 +46015,22 @@ function useDocxEditor(options = {}) {
         if (!nextParagraph) {
           return void 0;
         }
-        nextParagraph.children = children;
+        const sourceValues = /* @__PURE__ */ new Map();
+        for (const child of paragraph.children) {
+          if (isLockedField(child)) {
+            const key = child.tag ?? "";
+            sourceValues.set(key, [...sourceValues.get(key) ?? [], child.value ?? ""]);
+          }
+        }
+        const used = /* @__PURE__ */ new Map();
+        nextParagraph.children = children.map((child) => {
+          if (!isLockedField(child)) return child;
+          const key = child.tag ?? "";
+          const nth = used.get(key) ?? 0;
+          used.set(key, nth + 1);
+          const value = sourceValues.get(key)?.[nth];
+          return value === void 0 ? child : { ...child, value };
+        });
         nextParagraph.sourceXml = void 0;
         const tableNode = location.kind === "table-cell" ? nextModel.nodes[location.tableIndex] : void 0;
         if (tableNode?.type === "table") {
@@ -47686,6 +47706,8 @@ function DocxEditorViewer({
   renderTableContextMenu,
   inlineNodesFromText,
   formatColumnWidth,
+  displayModel,
+  isLockedParagraph,
   renderContextMenu,
   onFormFieldDoubleClick,
   mode = "edit"
@@ -47704,13 +47726,19 @@ function DocxEditorViewer({
   sourceModelRef.current = sourceEditor.model;
   const inlineNodesFromTextRef = A(inlineNodesFromText);
   inlineNodesFromTextRef.current = inlineNodesFromText;
+  const isLockedParagraphRef = A(isLockedParagraph);
+  isLockedParagraphRef.current = isLockedParagraph;
   const formatColumnWidthLabel = (widthPx) => {
     const centimetres = widthPx * 2.54 / 96;
     return formatColumnWidth ? formatColumnWidth(centimetres) : `${centimetres.toFixed(2)} cm`;
   };
   const reviewDisplay = T(
-    () => showTrackedChanges ?? sourceEditor.showTrackedChanges ? reviewDisplayModel(sourceEditor.model, revisionDisplay) : { model: sourceEditor.model, rowIndexes: /* @__PURE__ */ new Map(), paragraphIndexes: /* @__PURE__ */ new Map() },
-    [sourceEditor.model, sourceEditor.showTrackedChanges, showTrackedChanges, sourceEditor.trackedChanges, revisionDisplay]
+    () => showTrackedChanges ?? sourceEditor.showTrackedChanges ? reviewDisplayModel(sourceEditor.model, revisionDisplay) : {
+      model: displayModel ? displayModel(sourceEditor.model) : sourceEditor.model,
+      rowIndexes: /* @__PURE__ */ new Map(),
+      paragraphIndexes: /* @__PURE__ */ new Map()
+    },
+    [sourceEditor.model, sourceEditor.showTrackedChanges, showTrackedChanges, sourceEditor.trackedChanges, revisionDisplay, displayModel]
   );
   const tabLayoutModel = T(
     () => documentWithDefaultTabLayout2(documentWithPhysicalTableGrids(reviewDisplay.model)),
@@ -48343,7 +48371,7 @@ function DocxEditorViewer({
     [documentLayout, documentSections, editor.model, fontMetricsRevision, editor.model.metadata.compatibility?.evenAndOddHeaders, typography?.enableOpenTypeFeatures, typography?.adjustLineHeightInTable]
   );
   const precomputedPaginationMetrics = T(() => {
-    if (editor.isImporting || hasVisibleTrackedDeletions || headingStyles || Object.keys(tableColumnWidths).length > 0 || Object.keys(tableRowHeights).length > 0 || activeColumnResize || activeRowResize || activeTableResize) return void 0;
+    if (displayModel || editor.isImporting || hasVisibleTrackedDeletions || headingStyles || Object.keys(tableColumnWidths).length > 0 || Object.keys(tableRowHeights).length > 0 || activeColumnResize || activeRowResize || activeTableResize) return void 0;
     return resolvePrecomputedPaginationMetrics(
       editor.model,
       documentSections,
@@ -48356,6 +48384,7 @@ function DocxEditorViewer({
     documentSections,
     paginationSectionMetrics,
     typography,
+    displayModel,
     hasVisibleTrackedDeletions,
     headingStyles,
     tableColumnWidths,
@@ -56372,6 +56401,9 @@ function DocxEditorViewer({
           return;
         }
         event.preventDefault();
+        if (isLockedParagraphRef.current?.({ kind: "paragraph", nodeIndex })) {
+          return;
+        }
         cancelPendingPointerSelectionReconcile();
         if (intent.kind === "blocked") {
           return;
@@ -56667,6 +56699,9 @@ function DocxEditorViewer({
         cellIndex,
         paragraphIndex
       };
+      if (isLockedParagraphRef.current?.(cellLocation)) {
+        return;
+      }
       const currentText = continuationActive && continuation ? continuation.text : editableTextFromElement(paragraphElement);
       const selectionOffsets = continuationActive && continuation ? { start: continuation.caret, end: continuation.caret } : rangeSelectionOffsets ?? selectionOffsetsWithinElement(paragraphElement) ?? {
         start: currentText.length,
@@ -57112,7 +57147,11 @@ function DocxEditorViewer({
         }
       };
       const preserveAutomaticBorderFractions = tableAutomaticCollapsedBorderWidthPx(node) > 0;
-      const normalizeRowMeasurement = (heightPx, rowIndex) => preserveAutomaticBorderFractions ? normalizeMeasuredTableRowHeightForDefinitionPx(heightPx, node, rowIndex) : normalizeMeasuredTableRowHeightPx(heightPx);
+      const normalizeRowMeasurement = (heightPx, rowIndex) => (
+        // THUNDER: an exact row is as tall as it says, however short — the
+        // 14px floor would count a row folded to one twip as a line.
+        node.rows[rowIndex]?.style?.heightRule === "exact" && Number.isFinite(heightPx) && heightPx > 0 ? Math.max(1, Math.round(heightPx)) : preserveAutomaticBorderFractions ? normalizeMeasuredTableRowHeightForDefinitionPx(heightPx, node, rowIndex) : normalizeMeasuredTableRowHeightPx(heightPx)
+      );
       const recordMeasuredRow = (rowIndex, rowHeightPx) => {
         if (!Number.isFinite(rowHeightPx) || rowHeightPx <= 0) {
           return;

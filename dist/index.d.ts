@@ -2224,6 +2224,19 @@ interface DocxEditorViewerProps {
      */
     formatColumnWidth?: (centimetres: number) => string;
     /**
+     * THUNDER: the model the viewer lays out and draws instead of the document's
+     * own — the template editor's "view as a case", with what a case would not
+     * print reduced to strips. It must keep the document's shape: the same
+     * nodes, rows, cells and paragraphs at the same indexes, so the places an
+     * edit names are the document's places. Edits still go to the document.
+     */
+    displayModel?: (model: DocModel) => DocModel;
+    /**
+     * THUNDER: paragraphs typing must not reach — what `displayModel` reduced to
+     * a strip, whose text on screen is not the document's.
+     */
+    isLockedParagraph?: (location: ParagraphLocation) => boolean;
+    /**
      * Custom renderer for text, image, and table context menus.
      *
      * Call `props.closeMenu()` after handling a custom action.
@@ -2576,7 +2589,7 @@ declare function useDocxTrackChanges(editor: Pick<DocxEditorController, "tracked
 declare function useDocxComments(editor: Pick<DocxEditorController, "comments" | "showComments" | "setShowComments" | "toggleShowComments" | "createComment" | "setCommentResolved">): UseDocxCommentsResult;
 declare function useDocxPageLayout(editor: Pick<DocxEditorController, "model">): UseDocxPageLayoutResult;
 declare function useDocxPagination(editor: Pick<DocxEditorController, "currentPage" | "totalPages">): UseDocxPaginationResult;
-declare function DocxEditorViewer({ editor, className, style, zoom, defaultZoom, onZoomChange, pageBackgroundColor, pageGapBackgroundColor, deferInitialPaginationPaint, loadingState, pageVirtualization, visiblePageRange, pageIndexes, onPageCountChange, onRequestPageReveal, headingStyles, showTrackedChanges, revisionDisplay, renderTrackedChangeCard, showComments, renderCommentCard, renderTableContextMenu, inlineNodesFromText, formatColumnWidth, renderContextMenu, onFormFieldDoubleClick, mode, }: DocxEditorViewerProps): React.JSX.Element;
+declare function DocxEditorViewer({ editor, className, style, zoom, defaultZoom, onZoomChange, pageBackgroundColor, pageGapBackgroundColor, deferInitialPaginationPaint, loadingState, pageVirtualization, visiblePageRange, pageIndexes, onPageCountChange, onRequestPageReveal, headingStyles, showTrackedChanges, revisionDisplay, renderTrackedChangeCard, showComments, renderCommentCard, renderTableContextMenu, inlineNodesFromText, formatColumnWidth, displayModel, isLockedParagraph, renderContextMenu, onFormFieldDoubleClick, mode, }: DocxEditorViewerProps): React.JSX.Element;
 
 declare function invalidateFontMetrics(): void;
 
