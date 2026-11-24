@@ -27521,6 +27521,22 @@ function estimateWrappedLineCountForParagraph(paragraph, availableWidthPx, first
       return rememberLineCount(pretextPlainLineCount);
     }
   }
+  const firstLineIndentOnly = (paragraph.style?.indent?.firstLineTwips ?? 0) > 0 && !paragraph.style?.indent?.hangingTwips && !paragraph.style?.numbering && !paragraphContainsExplicitLineBreakText(paragraph);
+  if (firstLineIndentOnly && !useTabLeaderLayout && !useAnchoredTabLayout) {
+    const source = buildParagraphPretextLayoutSource(paragraph, void 0, typography);
+    const layout = source ? layoutParagraphPretextSource(
+      paragraph,
+      source,
+      maxLineWidthPx,
+      estimateParagraphLineHeightPx(paragraph),
+      [],
+      void 0,
+      typography
+    ) : void 0;
+    if (layout?.lineCount) {
+      return rememberLineCount(layout.lineCount);
+    }
+  }
   if (useTabLeaderLayout) {
     const tabLeaderLineCount = estimateTabLeaderWrappedLineCountForParagraph(
       paragraph,
