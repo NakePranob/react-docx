@@ -50161,10 +50161,17 @@ export function DocxEditorViewer({
         )) {
           return;
         }
-        const element = resolveParagraphHostElementForOffset(
-          paragraphIndex,
-          offset
-        );
+        // THUNDER: a paragraph with no field is typed into through its
+        // wrapped surface, drawn a few frames after a split; its host takes
+        // focus but not the keystrokes, so wait for the surface first.
+        const sourceNode = sourceModelRef.current?.nodes[paragraphIndex];
+        const awaitsSurface =
+          attempt < 20 &&
+          sourceNode?.type === "paragraph" &&
+          !sourceNode.children.some(isLockedField);
+        const element = awaitsSurface
+          ? undefined
+          : resolveParagraphHostElementForOffset(paragraphIndex, offset);
         if (!element || !element.isConnected) {
           if (attempt < 30) {
             window.requestAnimationFrame(() => {
@@ -50198,7 +50205,24 @@ export function DocxEditorViewer({
           window.requestAnimationFrame(() => {
             focusAttempt(attempt + 1);
           });
+          return;
         }
+        // THUNDER: a split paragraph with no field left is drawn again as a
+        // wrapped one a frame or two later, and the host focused here goes
+        // with it — focus fell to the body and typing after Enter went nowhere.
+        const watch = (frames: number): void => {
+          if (element.isConnected && document.activeElement === element) {
+            if (frames > 0) window.requestAnimationFrame(() => watch(frames - 1));
+            return;
+          }
+          if (
+            attempt < 30 &&
+            (!element.isConnected || document.activeElement === document.body)
+          ) {
+            focusAttempt(attempt + 1);
+          }
+        };
+        window.requestAnimationFrame(() => watch(10));
       };
 
       window.requestAnimationFrame(() => {
