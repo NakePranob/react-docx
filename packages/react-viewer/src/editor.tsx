@@ -55723,6 +55723,10 @@ export function DocxEditorViewer({
                 schedulePaginationMeasurementResume();
               }}
               onBeforeInput={(event) => {
+                // thunder: an edit here makes the contenteditable path's
+                // continuation stale — left set, the next cell keystroke
+                // after Enter replaced the paragraph with its old text.
+                editingIntentContinuationRef.current = undefined;
                 const input = event.nativeEvent as InputEvent;
                 wrappedParagraphInputHintRef.current = {
                   locationKey,
@@ -55895,6 +55899,7 @@ export function DocxEditorViewer({
                 schedulePaginationMeasurementResume();
               }}
               onKeyDown={(event) => {
+                editingIntentContinuationRef.current = undefined;
                 event.stopPropagation();
                 cancelPendingPointerSelectionReconcile();
                 if (isCompositionKeyboardEvent(event)) {
@@ -64288,6 +64293,38 @@ export function DocxEditorViewer({
                                           activeParagraphIndex
                                         )
                                       );
+                                      // thunder: a paragraph holding a variable
+                                      // has no textarea, so Enter lands here —
+                                      // split it as the textarea does, in the
+                                      // document's paragraph: committed as text,
+                                      // the variable's sample became plain text.
+                                      if (activeParagraph.children.some(isLockedField)) {
+                                        const sourceTable = sourceModelRef.current.nodes[nodeIndex];
+                                        const sourceParagraph =
+                                          sourceTable?.type === "table"
+                                            ? tableCellParagraphs(
+                                                sourceTable.rows[rowIndex]?.cells[cellIndex]?.nodes ?? []
+                                              )[activeParagraphIndex]
+                                            : undefined;
+                                        const split = editor.splitParagraphAtSelection(
+                                          ...splitInSource(activeParagraph, sourceParagraph, currentText, start, end),
+                                          {
+                                            kind: "table-cell",
+                                            tableIndex: nodeIndex,
+                                            rowIndex,
+                                            cellIndex,
+                                            paragraphIndex: activeParagraphIndex,
+                                          }
+                                        );
+                                        if (split) {
+                                          focusTableCellParagraphAtOffset(
+                                            cellDraftKey,
+                                            split.paragraphIndex,
+                                            split.caretOffset
+                                          );
+                                        }
+                                        return;
+                                      }
                                       editor.commitTableCellParagraphTextRecursive(
                                         nodeIndex,
                                         rowIndex,
