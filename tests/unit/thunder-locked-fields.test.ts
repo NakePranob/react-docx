@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import type { ParagraphNode } from "../../packages/doc-model/src";
-import { editAroundLockedFields } from "../../packages/react-viewer/src/locked-fields";
+import {
+  editAroundLockedFields,
+  editableTextLength,
+  joinParagraphChildren,
+} from "../../packages/react-viewer/src/locked-fields";
 
 // THUNDER: locked text fields edit as one unit (the template editor's chips).
 const chip = (value: string, tag = `{{${value}}}`) => ({
@@ -73,5 +77,33 @@ describe("editAroundLockedFields", () => {
 
   it("gives up when the children do not add up to the text", () => {
     expect(editAroundLockedFields(sample, "something else", 0, 1, "")).toBeUndefined();
+  });
+});
+
+describe("joinParagraphChildren", () => {
+  it("keeps the chips of both paragraphs, in order", () => {
+    const joined = joinParagraphChildren(
+      [{ type: "text", text: "วันที่ " }, chip("date")],
+      [{ type: "text", text: "เลขที่ " }, chip("number")]
+    );
+    expect(shape(joined)).toEqual(["วันที่ ", "[date]", "เลขที่ ", "[number]"]);
+  });
+
+  it("drops empty runs", () => {
+    const joined = joinParagraphChildren(
+      [{ type: "text", text: "" }, chip("a"), { type: "text", text: "x" }],
+      [{ type: "text", text: "y" }]
+    );
+    expect(shape(joined)).toEqual(["[a]", "x", "y"]);
+  });
+
+  it("keeps one run when both paragraphs are empty", () => {
+    expect(shape(joinParagraphChildren([{ type: "text", text: "" }], [{ type: "text", text: "" }]))).toEqual([""]);
+  });
+});
+
+describe("editableTextLength", () => {
+  it("counts text runs and chips as drawn", () => {
+    expect(editableTextLength(sample)).toBe(text.length);
   });
 });

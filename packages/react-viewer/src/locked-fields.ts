@@ -229,3 +229,23 @@ export function splitAroundLockedFields(
   });
   return { before, after };
 }
+
+/** The length of a paragraph's editable text as the viewer draws it: its
+ * text runs and the values of its locked fields. */
+export function editableTextLength(paragraph: ParagraphNode): number {
+  return paragraph.children.reduce((sum, child) => sum + (childEditableText(child)?.length ?? 0), 0);
+}
+
+/**
+ * Two paragraphs joined into one, the way Backspace at the start of the
+ * second (or Delete at the end of the first) does: every child of both is
+ * kept, fields included; empty text runs go unless nothing else is left.
+ */
+export function joinParagraphChildren(
+  first: ParagraphChild[],
+  second: ParagraphChild[]
+): ParagraphChild[] {
+  const all = [...first, ...second];
+  const kept = all.filter((child) => child.type !== "text" || child.text.length > 0);
+  return kept.length > 0 ? kept : all.slice(0, 1);
+}

@@ -45,7 +45,7 @@ import {
   useViewerZoom,
 } from "./viewer-zoom";
 import { copyModelForParagraphEdits, imageDropPositionAtTextOffset, insertImageAtDropPosition } from "./image-drop";
-import { editAroundLockedFields, isLockedField, lockedFieldText, offsetsInSource, splitAroundLockedFields } from "./locked-fields";
+import { editAroundLockedFields, editableTextLength, isLockedField, joinParagraphChildren, lockedFieldText, offsetsInSource, splitAroundLockedFields } from "./locked-fields";
 import { renderToStaticMarkup } from "react-dom/server";
 import { useVirtualizer, useWindowVirtualizer } from "@tanstack/react-virtual";
 import {
@@ -5935,6 +5935,17 @@ function splitInSource(
       ? offsetsInSource(drawn, source, [start, end])
       : undefined;
   return moved ? [moved.text, moved.offsets[0], moved.offsets[1]] : [text, start, end];
+}
+
+/**
+ * THUNDER: the caret after two paragraphs were joined goes where the first
+ * one ended, counted as the viewer draws it — the join reports it by text
+ * runs alone, which put it before a field that ended the first paragraph.
+ */
+function caretAfterJoin(range: DocxTextRange, first: ParagraphNode): DocxTextRange {
+  if (!first.children.some(isLockedField)) return range;
+  const offset = editableTextLength(first);
+  return { start: { ...range.start, offset }, end: { ...range.end, offset } };
 }
 
 function firstRunStyle(paragraph?: ParagraphNode): TextRunNode["style"] {
@@ -32538,11 +32549,30 @@ export function useDocxEditor(
           const shouldAdoptEndParagraphStyleOnDelete =
             replacementText.length === 0 &&
             !carriesStartPrefix &&
+            !startParagraph.children.some(isLockedField) &&
             carriesEndSuffix;
           const canPreserveCrossParagraphRunStyles =
             paragraphHasOnlyTextRuns(startParagraph) &&
             paragraphHasOnlyTextRuns(endParagraph);
-          if (canPreserveCrossParagraphRunStyles) {
+          // THUNDER: a join of two paragraphs (nothing between the end of the
+          // first and the start of the second) keeps every child of both —
+          // the text path below rebuilt the paragraph from its text alone,
+          // which dropped locked fields and put text where a field had been.
+          const joinsWholeParagraphs =
+            replacementText.length === 0 &&
+            safeStart >= startText.length &&
+            safeEnd === 0 &&
+            !canPreserveCrossParagraphRunStyles;
+          if (joinsWholeParagraphs) {
+            startParagraph.children = joinParagraphChildren(
+              startParagraph.children.map((child) => ({ ...child })),
+              endParagraph.children.map((child) => ({ ...child }))
+            );
+            startParagraph.sourceXml = undefined;
+            if (startLookup.tableNode) {
+              startLookup.tableNode.sourceXml = undefined;
+            }
+          } else if (canPreserveCrossParagraphRunStyles) {
             const startRuns = startParagraph.children
               .filter((child): child is TextRunNode => child.type === "text")
               .map(cloneTextRunWithMetadata);
@@ -50158,6 +50188,21 @@ export function DocxEditorViewer({
     ]
   );
 
+  // THUNDER: after a join, the caret goes where the first paragraph ended as
+  // drawn (after a field that ended it), and the joined paragraph gets focus —
+  // a paragraph that now holds a field is drawn anew, and the focus was lost.
+  const syncSelectionAfterJoin = React.useCallback(
+    (collapsedRange: DocxTextRange, first: DocNode | undefined): void => {
+      const range =
+        first?.type === "paragraph" ? caretAfterJoin(collapsedRange, first) : collapsedRange;
+      syncSelectionFromDocxRange(range);
+      if (range !== collapsedRange && range.start.location.kind === "paragraph") {
+        focusParagraphAtOffset(range.start.location.nodeIndex, range.start.offset);
+      }
+    },
+    [syncSelectionFromDocxRange, focusParagraphAtOffset]
+  );
+
   const focusTableCellParagraphAtOffset = React.useCallback(
     (cellDraftKey: string, paragraphIndex: number, offset: number): void => {
       const [tableIndex, rowIndex, cellIndex] = cellDraftKey.split(":").map(Number);
@@ -51493,7 +51538,7 @@ export function DocxEditorViewer({
                   },
                 });
                 if (collapsedRange) {
-                  syncSelectionFromDocxRange(collapsedRange);
+                  syncSelectionAfterJoin(collapsedRange, previousParagraph);
                 }
               }
               return;
@@ -51522,7 +51567,7 @@ export function DocxEditorViewer({
                   },
                 });
                 if (collapsedRange) {
-                  syncSelectionFromDocxRange(collapsedRange);
+                  syncSelectionAfterJoin(collapsedRange, editor.model.nodes[nodeIndex]);
                 }
               }
               return;
@@ -51833,6 +51878,7 @@ export function DocxEditorViewer({
       schedulePaginationMeasurementResume,
       selectionOffsetsWithinElement,
       syncSelectionFromDocxRange,
+      syncSelectionAfterJoin,
     ]
   );
 
@@ -56182,10 +56228,12 @@ export function DocxEditorViewer({
                         },
                       });
                     });
-                    if (collapsed) {
+                    // THUNDER: after a field that ended the first paragraph.
+                    const placed = collapsed && backward ? caretAfterJoin(collapsed, targetParagraph) : collapsed;
+                    if (placed) {
                       focusParagraphLocationAtOffset(
-                        paragraphLocationFromTextRangeLocation(collapsed.start.location),
-                        collapsed.start.offset
+                        paragraphLocationFromTextRangeLocation(placed.start.location),
+                        placed.start.offset
                       );
                     }
                     return;
@@ -61819,7 +61867,7 @@ export function DocxEditorViewer({
                     },
                   });
                   if (collapsedRange) {
-                    syncSelectionFromDocxRange(collapsedRange);
+                    syncSelectionAfterJoin(collapsedRange, previousParagraph);
                   }
                   return;
                 }
@@ -61851,7 +61899,7 @@ export function DocxEditorViewer({
                     },
                   });
                   if (collapsedRange) {
-                    syncSelectionFromDocxRange(collapsedRange);
+                    syncSelectionAfterJoin(collapsedRange, editor.model.nodes[nodeIndex]);
                   }
                   return;
                 }
