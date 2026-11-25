@@ -40173,6 +40173,36 @@ export function DocxEditorViewer({
   React.useEffect(() => {
     reportTableCellSelection?.(tableCellSelectionRange);
   }, [reportTableCellSelection, tableCellSelectionRange]);
+  // THUNDER: a block of cells is named by each row's cell index, which a
+  // merge or split renumbers — kept, the block then covered cells nobody
+  // selected (shading after รวมเซลล์ reached the next column). Drop it when
+  // the selected table's shape changes.
+  const selectedTableShape = (() => {
+    const table = tableCellSelectionRange
+      ? editor.model.nodes[tableCellSelectionRange.tableIndex]
+      : undefined;
+    return table?.type === "table"
+      ? table.rows
+          .map((row) =>
+            row.cells.map((cell) => `${cell.style?.gridSpan ?? 1}x${cell.style?.rowSpan ?? 1}`).join(",")
+          )
+          .join("|")
+      : "";
+  })();
+  const selectedTableShapeRef = React.useRef<{ range: DocxTableCellSelectionRange; shape: string } | undefined>(undefined);
+  React.useLayoutEffect(() => {
+    const kept = selectedTableShapeRef.current;
+    if (!tableCellSelectionRange) {
+      selectedTableShapeRef.current = undefined;
+      return;
+    }
+    if (kept?.range === tableCellSelectionRange && kept.shape !== selectedTableShape) {
+      selectedTableShapeRef.current = undefined;
+      setTableCellSelectionRange(undefined);
+      return;
+    }
+    selectedTableShapeRef.current = { range: tableCellSelectionRange, shape: selectedTableShape };
+  }, [tableCellSelectionRange, selectedTableShape]);
   const [tableMoveDropPreview, setTableMoveDropPreview] = React.useState<
     | {
         top: number;
@@ -47223,9 +47253,12 @@ export function DocxEditorViewer({
   );
 
   const focusWrappedParagraphTextarea = React.useCallback((): void => {
-    scheduleDomWrite(() => {
+    const write = (attempt: number): void => {
       const textarea = wrappedParagraphTextareaRef.current;
       if (!textarea || !textarea.isConnected) {
+        if (attempt < 10) {
+          window.requestAnimationFrame(() => scheduleDomWrite(() => write(attempt + 1)));
+        }
         return;
       }
       const pendingSelection = wrappedParagraphPendingSelectionRef.current;
@@ -47245,16 +47278,22 @@ export function DocxEditorViewer({
       if (
         !selectionSource ||
         compositionActiveRef.current ||
-        (document.activeElement === textarea && !pendingSelection) ||
-        normalizeTextareaText(selectionSource.text) !== textarea.value
+        (document.activeElement === textarea && !pendingSelection)
       ) {
         return;
       }
+      // THUNDER: the textarea reaches the paragraph a click or a split just
+      // made only once that is drawn again; bailing here left focus where
+      // it was and the first keys typed went there. Wait a few frames.
       if (
+        normalizeTextareaText(selectionSource.text) !== textarea.value ||
         textarea.closest("[data-docx-wrapped-paragraph-root='true']")
           ?.getAttribute("data-docx-wrapped-paragraph-location-key") !==
-        selectionSource.locationKey
+          selectionSource.locationKey
       ) {
+        if (attempt < 10) {
+          window.requestAnimationFrame(() => scheduleDomWrite(() => write(attempt + 1)));
+        }
         return;
       }
       if (document.activeElement !== textarea) {
@@ -47296,7 +47335,8 @@ export function DocxEditorViewer({
       } catch {
         // Ignore selection sync failures; focus alone is still better than dropping the session.
       }
-    });
+    };
+    scheduleDomWrite(() => write(0));
   }, [activeWrappedParagraphSession]);
 
   const commitWrappedParagraphTextAtLocation = React.useCallback(
@@ -50271,8 +50311,10 @@ export function DocxEditorViewer({
         }
         const cellElement =
           tableCellEditorElementsRef.current.get(cellDraftKey);
-        if (!cellElement) {
-          if (attempt < 6) {
+        // THUNDER: a cell redrawn for editing replaces the element the map
+        // held — focusing the old one left focus on the body.
+        if (!cellElement || !cellElement.isConnected) {
+          if (attempt < 30) {
             window.requestAnimationFrame(() => focusAttempt(attempt + 1));
           }
           return;
@@ -50299,6 +50341,14 @@ export function DocxEditorViewer({
           safeOffset,
           safeOffset
         );
+        const watch = (frames: number): void => {
+          if (cellElement.isConnected && document.activeElement !== document.body) {
+            if (frames > 0) window.requestAnimationFrame(() => watch(frames - 1));
+            return;
+          }
+          if (attempt < 30) focusAttempt(attempt + 1);
+        };
+        window.requestAnimationFrame(() => watch(10));
       };
       window.requestAnimationFrame(() => focusAttempt(0));
     },
@@ -55431,6 +55481,20 @@ export function DocxEditorViewer({
         anchorOffset,
         caretAffinity: hit.affinity,
       });
+      // THUNDER: in a cell the textarea moves to this paragraph only once it
+      // is drawn again, too late for the focus here — the first keys typed
+      // after the click went to the body. Focus it as Tab into a cell does.
+      if (location.kind === "table-cell" && !event.shiftKey) {
+        flushSync(() => {
+          editor.selectTableCell(location.tableIndex, location.rowIndex, location.cellIndex);
+        });
+        focusTableCellParagraphAtOffset(
+          `${location.tableIndex}:${location.rowIndex}:${location.cellIndex}`,
+          location.paragraphIndex,
+          offset
+        );
+        return;
+      }
       focusWrappedParagraphTextarea();
     };
 
@@ -55567,6 +55631,20 @@ export function DocxEditorViewer({
           focusWrappedParagraphTextarea();
           event.preventDefault();
           event.stopPropagation();
+          // THUNDER: in a table cell this is the table's menu, as it is on
+          // the cell's empty part — the text menu here hid insert and delete.
+          if (location.kind === "table-cell" && !pointIsWithinSelection) {
+            clearTableCellSelection();
+            openTableContextMenu(
+              {
+                tableIndex: location.tableIndex,
+                rowIndex: location.rowIndex,
+                cellIndex: location.cellIndex,
+              },
+              { x: event.clientX, y: event.clientY }
+            );
+            return;
+          }
           openContextMenu(
             {
               kind: "text",
@@ -55777,6 +55855,18 @@ export function DocxEditorViewer({
                   }
                   if (element) {
                     registeredTextareaElement = element;
+                    // THUNDER: the session moved here from another paragraph,
+                    // whose textarea — focused — was just removed; focus fell
+                    // to the body, and the first key typed after a click into
+                    // a table cell went nowhere. Take it back.
+                    if (
+                      !isReadOnly &&
+                      !compositionActiveRef.current &&
+                      (document.activeElement === document.body ||
+                        document.activeElement === null)
+                    ) {
+                      element.focus({ preventScroll: true });
+                    }
                     const pendingSelection =
                       wrappedParagraphPendingSelectionRef.current;
                     const safeStart = Math.max(
@@ -63368,6 +63458,92 @@ export function DocxEditorViewer({
                                     `[data-docx-cell-key='${cellElementKey}']`
                                   )
                                 );
+                                // THUNDER: off the text — an empty
+                                // paragraph, the blank beside a line or under
+                                // the last one — where the browser places no
+                                // caret and what was typed went nowhere. The
+                                // caret goes to the nearest line's start or
+                                // end, as Word puts it.
+                                const pointerHost = pointerTargetElement?.closest<HTMLElement>(
+                                  "[data-docx-table-paragraph-index]"
+                                );
+                                const offText =
+                                  (event.button === 0 || event.button === undefined) &&
+                                  !event.shiftKey &&
+                                  !pointerTargetElement?.closest("button,input,select,a,[role='button']") &&
+                                  !eventTargetIsNestedTableParagraphEditor(event.target) &&
+                                  (!pointerHost ||
+                                    pointerHost === pointerTargetElement ||
+                                    !pointerTargetElement?.textContent);
+                                if (offText && pointerTargetElement) {
+                                  const cellRoot = event.currentTarget.querySelector<HTMLElement>(
+                                    `[data-docx-cell-key='${cellElementKey}']`
+                                  );
+                                  const hosts = Array.from(
+                                    cellRoot?.querySelectorAll<HTMLElement>(
+                                      ":scope > [data-docx-table-paragraph-index]"
+                                    ) ?? []
+                                  );
+                                  const distance = (element: HTMLElement): number => {
+                                    const box = element.getBoundingClientRect();
+                                    return event.clientY < box.top
+                                      ? box.top - event.clientY
+                                      : event.clientY > box.bottom
+                                      ? event.clientY - box.bottom
+                                      : 0;
+                                  };
+                                  const nearest =
+                                    pointerHost ??
+                                    hosts.reduce<HTMLElement | undefined>(
+                                      (best, host) =>
+                                        !best || distance(host) < distance(best) ? host : best,
+                                      undefined
+                                    );
+                                  const paragraphIndex = Number(
+                                    nearest?.getAttribute("data-docx-table-paragraph-index")
+                                  );
+                                  if (nearest && Number.isInteger(paragraphIndex)) {
+                                    const textLength = nearest.textContent?.length ?? 0;
+                                    const range = document.createRange();
+                                    range.selectNodeContents(nearest);
+                                    const textBox = range.getBoundingClientRect();
+                                    const offset =
+                                      textLength > 0 &&
+                                      event.clientX < textBox.left &&
+                                      event.clientY <= nearest.getBoundingClientRect().bottom
+                                        ? 0
+                                        : textLength;
+                                    event.preventDefault();
+                                    pendingTableCellFocusRef.current = undefined;
+                                    // The paragraph typed in before keeps its
+                                    // session (and its textarea the focus) else.
+                                    setActiveWrappedParagraphSession(undefined);
+                                    // The click after this would place the caret
+                                    // again, from the point, over the first
+                                    // character typed.
+                                    suppressNextTableCellClickRef.current = true;
+                                    // As Tab does: the editor's selection first,
+                                    // then the caret — typed text otherwise kept
+                                    // only its first character.
+                                    flushSync(() => {
+                                      editor.selectTableCell(nodeIndex, rowIndex, cellIndex);
+                                    });
+                                    beginTableCellSelectionDrag(
+                                      event.pointerId,
+                                      { tableIndex: nodeIndex, rowIndex, cellIndex },
+                                      event.clientX,
+                                      event.clientY,
+                                      undefined,
+                                      true
+                                    );
+                                    focusTableCellParagraphAtOffset(
+                                      `${nodeIndex}:${rowIndex}:${cellIndex}`,
+                                      paragraphIndex,
+                                      offset
+                                    );
+                                    return;
+                                  }
+                                }
                                 if (pointerInsideEditableCell) {
                                   // Preserve native caret placement and text drag behavior.
                                   pendingTableCellFocusRef.current = undefined;
@@ -64048,6 +64224,10 @@ export function DocxEditorViewer({
                                     }
 
                                     if (event.detail > 1) {
+                                      return;
+                                    }
+                                    // THUNDER: placed already, off the text (pointerdown).
+                                    if (suppressNextTableCellClickRef.current) {
                                       return;
                                     }
 
