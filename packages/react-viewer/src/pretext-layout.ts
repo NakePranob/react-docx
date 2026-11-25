@@ -1951,7 +1951,7 @@ export function layoutItemsWithPretextAroundExclusions(
   return nextLayout;
 }
 
-export function resolveOffsetAtPoint(
+function resolveRawOffsetAtPoint(
   layout: PretextVariableWidthLayout,
   x: number,
   y: number
@@ -1997,6 +1997,36 @@ export function resolveOffsetAtPoint(
   }
 
   return Math.max(0, Math.min(textLength, lastFragment.hardBreakOffset ?? lastFragment.endOffset));
+}
+
+/**
+ * THUNDER: an offset inside a character cluster, moved to its end. Thai
+ * vowel and tone marks have no width of their own, so a point at a cluster's
+ * right edge hit every offset in it — the first won, between a consonant and
+ * its marks, and a word selected by dragging took the marks before it and
+ * left its own last mark out ("ผู้ให้กู้" in bold read "ผู้ให้ก").
+ */
+export function graphemeBoundaryAtOrAfter(text: string, offset: number): number {
+  if (offset <= 0 || offset >= text.length) return offset;
+  graphemeSegmenter ??= new Intl.Segmenter(undefined, { granularity: "grapheme" });
+  const from = Math.max(0, offset - 8);
+  for (const { index, segment } of graphemeSegmenter.segment(text.slice(from, offset + 8))) {
+    const start = from + index;
+    const end = start + segment.length;
+    if (offset > start && offset < end) return end;
+    if (start >= offset) break;
+  }
+  return offset;
+}
+
+/** The offset nearest a point, never inside a character cluster. */
+export function resolveOffsetAtPoint(
+  layout: PretextVariableWidthLayout,
+  x: number,
+  y: number
+): number {
+  const hit = resolveRawOffsetAtPoint(layout, x, y);
+  return layout.text ? graphemeBoundaryAtOrAfter(layout.text, hit) : hit;
 }
 
 export function resolveCaretPositionAtPoint(

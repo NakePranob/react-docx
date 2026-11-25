@@ -4518,6 +4518,14 @@ export interface DocxEditorController {
    * Indices are the table's node index and each row's cell index.
    */
   tableCellSelection?: DocxTableCellSelectionRange;
+  /**
+   * THUNDER: where `DocxEditorViewer` hands over how a range in what it draws
+   * (a `displayModel` may draw a field with another value) maps onto the
+   * document, so a style applied to a selection lands on what was selected.
+   */
+  setDisplayRangeMapper: (
+    mapper: ((range: DocxTextRange) => DocxTextRange) | undefined
+  ) => void;
   /** THUNDER: where `DocxEditorViewer` reports its cell selection. */
   reportTableCellSelection: (
     range: DocxTableCellSelectionRange | undefined
@@ -5932,6 +5940,21 @@ function formFieldDisplayValue(field: FormFieldRunNode): string {
  * sample in place of its value; split as the document's, that drawn text put
  * the sample into the paragraph as plain text.
  */
+let wordSegmenter: Intl.Segmenter | undefined;
+
+/** THUNDER: the word around an offset — Thai words too, which no space
+ * separates — or undefined on a space or punctuation. */
+function wordAroundOffset(text: string, offset: number): { start: number; end: number } | undefined {
+  wordSegmenter ??= new Intl.Segmenter("th", { granularity: "word" });
+  for (const { index, segment, isWordLike } of wordSegmenter.segment(text)) {
+    const end = index + segment.length;
+    if (offset >= index && (offset < end || (offset === end && end === text.length))) {
+      return isWordLike ? { start: index, end } : undefined;
+    }
+  }
+  return undefined;
+}
+
 /** THUNDER: a 1pt line — the least a paragraph between two tables can be. */
 const HAIRLINE_TWIPS = 20;
 
@@ -31924,6 +31947,24 @@ export function useDocxEditor(
     suppressNextDomSelectionRestoreRef.current = true;
   }, []);
 
+  const displayRangeMapperRef = React.useRef<
+    ((range: DocxTextRange) => DocxTextRange) | undefined
+  >(undefined);
+  const setDisplayRangeMapper = React.useCallback(
+    (mapper: ((range: DocxTextRange) => DocxTextRange) | undefined): void => {
+      displayRangeMapperRef.current = mapper;
+    },
+    []
+  );
+  // THUNDER: the active range is kept in what the viewer draws; styles go
+  // onto the document, whose fields may be of another length.
+  const activeRangeInDocument = (
+    range: DocxTextRange | undefined
+  ): DocxTextRange | undefined =>
+    range && displayRangeMapperRef.current
+      ? displayRangeMapperRef.current(range)
+      : range;
+
   const applySelectedStyleChange = React.useCallback(
     (
       mutator: (
@@ -31931,8 +31972,14 @@ export function useDocxEditor(
       ) => TextRunNode["style"] | undefined
     ): void => {
       const currentState = canonicalEditorStateRef.current;
+      // THUNDER: a range just set (a toolbar putting back the selection a
+      // dropdown's focus took) is in the ref before the state renders.
       const textRangeSnapshot = cloneTextRange(
-        currentState.activeTextRange ?? lastInViewerActiveTextRangeRef.current
+        activeRangeInDocument(
+          activeTextRangeRef.current ??
+            currentState.activeTextRange ??
+            lastInViewerActiveTextRangeRef.current
+        )
       );
       const selectionSnapshot = textRangeSnapshot
         ? selectionFromTextRangeLocation(
@@ -32196,7 +32243,7 @@ export function useDocxEditor(
     | undefined => {
     const currentState = canonicalEditorStateRef.current;
     const range = cloneTextRange(
-      currentState.activeTextRange ?? lastInViewerActiveTextRangeRef.current
+      activeRangeInDocument(currentState.activeTextRange ?? lastInViewerActiveTextRangeRef.current)
     );
     const styleFromSelection = runStyleForEditorSelection(
       currentState.model,
@@ -35865,6 +35912,7 @@ export function useDocxEditor(
     applyModelChange,
     tableCellSelection,
     reportTableCellSelection,
+    setDisplayRangeMapper,
     documentLoadNonce,
     historyRevision,
     fileName,
@@ -39521,6 +39569,31 @@ export function DocxEditorViewer({
     },
     [sourceEditor, tabLayoutModel, reviewDisplay, revisionDisplay]
   );
+  // THUNDER: a range in what is drawn, onto the document — for styles
+  // applied to a selection in a paragraph whose fields are drawn with a
+  // sample value of another length (ดูแบบเคส).
+  const drawnModelRef = React.useRef(tabLayoutModel);
+  drawnModelRef.current = tabLayoutModel;
+  const setDisplayRangeMapper = sourceEditor.setDisplayRangeMapper;
+  React.useEffect(() => {
+    if (!displayModel || !setDisplayRangeMapper) return;
+    const onDocument = (boundary: DocxTextRangeBoundary): DocxTextRangeBoundary => {
+      const location = paragraphLocationFromTextRangeLocation(boundary.location);
+      const drawn = getParagraphAtLocation(drawnModelRef.current, location).paragraph;
+      const source = getParagraphAtLocation(sourceModelRef.current, location).paragraph;
+      if (!drawn || !source || drawn === source || !drawn.children.some(isLockedField)) {
+        return boundary;
+      }
+      const moved = offsetsInSource(drawn, source, [boundary.offset]);
+      return moved ? { ...boundary, offset: moved.offsets[0] } : boundary;
+    };
+    setDisplayRangeMapper((range) => ({
+      ...range,
+      start: onDocument(range.start),
+      end: onDocument(range.end),
+    }));
+    return () => setDisplayRangeMapper(undefined);
+  }, [displayModel, setDisplayRangeMapper]);
   const fontMetricsRevision = React.useSyncExternalStore(
     subscribeFontMetrics,
     getFontMetricsRevision,
@@ -55802,7 +55875,10 @@ export function DocxEditorViewer({
             (event.clientX - rect.left) / zoomScale,
             (event.clientY - rect.top) / zoomScale
           );
-          const wordRange = expandOffsetToWord(textValue, offset);
+          // THUNDER: Thai words have no space between them; the browser's
+          // word segmenter finds them, where splitting on spaces took a run
+          // of words or nothing.
+          const wordRange = wordAroundOffset(textValue, offset) ?? expandOffsetToWord(textValue, offset);
           syncWrappedParagraphRange(location, wordRange.start, wordRange.end, {
             textOverride: textValue,
             textLength: textValue.length,
