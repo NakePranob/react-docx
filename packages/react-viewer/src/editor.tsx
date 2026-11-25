@@ -5932,6 +5932,9 @@ function formFieldDisplayValue(field: FormFieldRunNode): string {
  * sample in place of its value; split as the document's, that drawn text put
  * the sample into the paragraph as plain text.
  */
+/** THUNDER: a 1pt line — the least a paragraph between two tables can be. */
+const HAIRLINE_TWIPS = 20;
+
 function splitInSource(
   drawn: DocNode | undefined,
   source: DocNode | undefined,
@@ -50336,6 +50339,32 @@ export function DocxEditorViewer({
         (nodes[nodeIndex - 1]?.type !== "table" && nodes[nodeIndex + 1]?.type !== "table")
       ) {
         return false;
+      }
+      // THUNDER: between two tables the paragraph shrinks to a 1pt line
+      // instead: two tables with nothing between them are one table to Word.
+      if (nodes[nodeIndex - 1]?.type === "table" && nodes[nodeIndex + 1]?.type === "table") {
+        const spacing = node.style?.spacing;
+        if (spacing?.lineRule === "exact" && (spacing.lineTwips ?? 0) <= HAIRLINE_TWIPS) {
+          return false;
+        }
+        setActiveWrappedParagraphSession(undefined);
+        editor.applyModelChange((current) => ({
+          ...current,
+          nodes: current.nodes.map((current, index) =>
+            index === nodeIndex && current.type === "paragraph"
+              ? {
+                  ...current,
+                  children: [],
+                  style: {
+                    ...current.style,
+                    spacing: { beforeTwips: 0, afterTwips: 0, lineTwips: HAIRLINE_TWIPS, lineRule: "exact" },
+                  },
+                  paragraphMarkStyle: { ...current.paragraphMarkStyle, fontSizePt: 1, fontSizeCsPt: 1 },
+                }
+              : current
+          ),
+        }));
+        return true;
       }
       setActiveWrappedParagraphSession(undefined);
       editor.applyModelChange((current) => ({
