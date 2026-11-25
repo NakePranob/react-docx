@@ -1500,6 +1500,28 @@ export function resolveMeasuredPageContentHeightsPxForEditedModel(
     : measuredPageContentHeightsPxByPageIndex.slice(0, validPageCount);
 }
 
+// THUNDER: a locked field is one unit; a caret goes beside it, never into
+// its text, where nothing typed would reach the editor. Every walk from a
+// text offset to a DOM position goes through this.
+function positionBesideLockedField(
+  textNode: Node,
+  atStart: boolean
+): { node: Node; offset: number } | undefined {
+  const field = textNode.parentElement?.closest("[data-docx-locked-field='true']");
+  if (!field?.parentNode) return undefined;
+  const index = Array.prototype.indexOf.call(field.parentNode.childNodes, field) as number;
+  return { node: field.parentNode, offset: atStart ? index : index + 1 };
+}
+
+/** THUNDER: an element-anchored caret right beside a locked field is a real
+ * caret (there is no text node there to hold it), not one a re-render left. */
+function caretBesideLockedField(node: Node | null, offset: number): boolean {
+  if (!(node instanceof Element)) return false;
+  const isField = (child: ChildNode | undefined) =>
+    child instanceof Element && child.matches("[data-docx-locked-field='true']");
+  return isField(node.childNodes[offset - 1]) || isField(node.childNodes[offset]);
+}
+
 function placeCaretInsideElementDom(element: HTMLElement): void {
   const selection = window.getSelection();
   if (!selection) {
@@ -1642,18 +1664,8 @@ function setSelectionWithinElementByTextOffsetsDom(
 
       const textLength = currentTextNode.textContent?.length ?? 0;
       if (traversed + textLength >= safeOffset) {
-        // THUNDER: a locked field is one unit; a caret goes beside it, never
-        // into its text, where nothing typed would reach the editor.
-        const field = currentTextNode.parentElement?.closest(
-          "[data-docx-locked-field='true']"
-        );
-        if (field?.parentNode) {
-          const index = Array.prototype.indexOf.call(field.parentNode.childNodes, field) as number;
-          return {
-            node: field.parentNode,
-            offset: safeOffset <= traversed ? index : index + 1,
-          };
-        }
+        const beside = positionBesideLockedField(currentTextNode, safeOffset <= traversed);
+        if (beside) return beside;
         return {
           node: currentTextNode,
           offset: Math.max(0, safeOffset - traversed),
@@ -29851,20 +29863,23 @@ function normalizeTextRangeForModel(
     return undefined;
   }
 
+  // THUNDER: a paragraph that holds a locked field keeps the range's offsets
+  // as they are — they count the field as the viewer draws it (a display
+  // model may draw it longer than the document's label), and clamped to the
+  // paragraph's text runs alone the caret after a field that ends the
+  // paragraph fell back to before an earlier field, where typing then went.
+  const offsetIn = (paragraph: ParagraphNode, offset: number): number =>
+    paragraph.children.some(isLockedField)
+      ? Math.max(0, Math.round(offset))
+      : normalizeRangeBoundaryParagraphOffset(paragraph, offset);
   return normalizeTextRange({
     start: {
       location: cloneTextRangeLocation(startLocation),
-      offset: normalizeRangeBoundaryParagraphOffset(
-        startParagraph,
-        normalized.start.offset
-      ),
+      offset: offsetIn(startParagraph, normalized.start.offset),
     },
     end: {
       location: cloneTextRangeLocation(endLocation),
-      offset: normalizeRangeBoundaryParagraphOffset(
-        endParagraph,
-        normalized.end.offset
-      ),
+      offset: offsetIn(endParagraph, normalized.end.offset),
     },
   });
 }
@@ -45618,10 +45633,12 @@ export function DocxEditorViewer({
 
           const textLength = currentTextNode.textContent?.length ?? 0;
           if (traversed + textLength >= safeOffset) {
-            return {
-              node: currentTextNode,
-              offset: Math.max(0, safeOffset - traversed),
-            };
+            return (
+              positionBesideLockedField(currentTextNode, safeOffset <= traversed) ?? {
+                node: currentTextNode,
+                offset: Math.max(0, safeOffset - traversed),
+              }
+            );
           }
 
           traversed += textLength;
@@ -45771,10 +45788,12 @@ export function DocxEditorViewer({
 
         const textLength = currentTextNode.textContent?.length ?? 0;
         if (traversed + textLength >= safeOffset) {
-          return {
-            node: currentTextNode,
-            offset: Math.max(0, safeOffset - traversed),
-          };
+          return (
+            positionBesideLockedField(currentTextNode, safeOffset <= traversed) ?? {
+              node: currentTextNode,
+              offset: Math.max(0, safeOffset - traversed),
+            }
+          );
         }
         traversed += textLength;
         currentTextNode = walker.nextNode();
@@ -46633,7 +46652,8 @@ export function DocxEditorViewer({
         liveSelection.isCollapsed &&
         liveSelection.rangeCount > 0 &&
         anchorNode &&
-        anchorNode.nodeType !== Node.TEXT_NODE
+        anchorNode.nodeType !== Node.TEXT_NODE &&
+        !caretBesideLockedField(anchorNode, liveSelection.anchorOffset)
     );
     const selectionDropped = Boolean(
       editorHasFocus && (!liveSelection || liveSelection.rangeCount === 0)
@@ -46789,7 +46809,9 @@ export function DocxEditorViewer({
         rootElement.contains(liveRange.endContainer)
     );
     const anchorIsElement = Boolean(
-      anchorNode && anchorNode.nodeType !== Node.TEXT_NODE
+      anchorNode &&
+        anchorNode.nodeType !== Node.TEXT_NODE &&
+        !caretBesideLockedField(anchorNode, selection.anchorOffset)
     );
     const selectionWasDestroyed = isDomSelectionDestroyed({
       hasLiveRange: Boolean(liveRange),
@@ -47797,8 +47819,10 @@ export function DocxEditorViewer({
           rootElement.contains(activeElement) &&
           activeElement.contains(selectionRange.startContainer) &&
           activeElement.contains(selectionRange.endContainer) &&
-          selectionRange.startContainer.nodeType === Node.TEXT_NODE &&
-          selectionRange.endContainer.nodeType === Node.TEXT_NODE
+          (selectionRange.startContainer.nodeType === Node.TEXT_NODE ||
+            caretBesideLockedField(selectionRange.startContainer, selectionRange.startOffset)) &&
+          (selectionRange.endContainer.nodeType === Node.TEXT_NODE ||
+            caretBesideLockedField(selectionRange.endContainer, selectionRange.endOffset))
       );
       if (
         selectionWithinSingleEditableHost &&
