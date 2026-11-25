@@ -52485,8 +52485,13 @@ function DocxEditorViewer({
     },
     [editor, typography?.enableOpenTypeFeatures, typography?.adjustLineHeightInTable]
   );
+  const wrappedTextareaFocusGenerationRef = React9.useRef(0);
   const focusWrappedParagraphTextarea = React9.useCallback(() => {
+    const generation = ++wrappedTextareaFocusGenerationRef.current;
     const write = (attempt) => {
+      if (generation !== wrappedTextareaFocusGenerationRef.current) {
+        return;
+      }
       const textarea = wrappedParagraphTextareaRef.current;
       if (!textarea || !textarea.isConnected) {
         if (attempt < 10) {
@@ -52503,10 +52508,12 @@ function DocxEditorViewer({
         text: session.text,
         anchorOffset: session.anchorOffset
       } : void 0;
-      if (!selectionSource || compositionActiveRef.current || document.activeElement === textarea && !pendingSelection) {
+      if (!selectionSource || compositionActiveRef.current || document.activeElement === textarea && !pendingSelection || // Typed ahead of the session: putting its selection back would
+      // move the caret behind what was just typed.
+      normalizeTextareaText(selectionSource.text) !== textarea.value) {
         return;
       }
-      if (normalizeTextareaText(selectionSource.text) !== textarea.value || textarea.closest("[data-docx-wrapped-paragraph-root='true']")?.getAttribute("data-docx-wrapped-paragraph-location-key") !== selectionSource.locationKey) {
+      if (textarea.closest("[data-docx-wrapped-paragraph-root='true']")?.getAttribute("data-docx-wrapped-paragraph-location-key") !== selectionSource.locationKey) {
         if (attempt < 10) {
           window.requestAnimationFrame(() => scheduleDomWrite(() => write(attempt + 1)));
         }
@@ -54630,8 +54637,17 @@ function DocxEditorViewer({
     }
     const modelText = wrappedParagraphSessionText(paragraph, typography);
     if (modelText !== activeWrappedParagraphSession.text && !activeWrappedParagraphSession.isComposing) {
+      const textarea = wrappedParagraphTextareaRef.current;
+      const typedCaret = textarea && document.activeElement === textarea && normalizeTextareaText(modelText) === textarea.value ? {
+        selectionStart: textareaOffsetToSourceOffset(modelText, textarea.selectionStart),
+        selectionEnd: textareaOffsetToSourceOffset(modelText, textarea.selectionEnd),
+        anchorOffset: textareaOffsetToSourceOffset(
+          modelText,
+          textarea.selectionDirection === "backward" ? textarea.selectionEnd : textarea.selectionStart
+        )
+      } : void 0;
       setActiveWrappedParagraphSession(
-        (current) => current && current.locationKey === activeWrappedParagraphSession.locationKey ? {
+        (current) => current && current.locationKey === activeWrappedParagraphSession.locationKey ? typedCaret ? { ...current, text: modelText, ...typedCaret } : {
           ...current,
           text: modelText,
           selectionStart: Math.max(
@@ -54750,7 +54766,9 @@ function DocxEditorViewer({
     (cellDraftKey, paragraphIndex, offset) => {
       const [tableIndex, rowIndex, cellIndex] = cellDraftKey.split(":").map(Number);
       const focusAttempt = (attempt) => {
-        if (Number.isInteger(tableIndex) && Number.isInteger(rowIndex) && Number.isInteger(cellIndex) && focusWrappedParagraphRange(
+        if (Number.isInteger(tableIndex) && Number.isInteger(rowIndex) && Number.isInteger(cellIndex) && // THUNDER: the latest one — the one closed over reads the model
+        // from before the split, where a cell's new paragraph is missing.
+        focusWrappedParagraphRangeRef.current(
           { kind: "table-cell", tableIndex, rowIndex, cellIndex, paragraphIndex },
           offset
         )) {
@@ -59125,8 +59143,12 @@ function DocxEditorViewer({
                         if (element || wrappedParagraphTextareaRef.current === registeredTextareaElement) {
                           wrappedParagraphTextareaRef.current = element;
                         }
+                        const justMounted = Boolean(element && !element.dataset.thunderMounted);
                         if (element) {
+                          element.dataset.thunderMounted = "true";
                           registeredTextareaElement = element;
+                        }
+                        if (element && justMounted) {
                           if (!isReadOnly && !compositionActiveRef.current && (document.activeElement === document.body || document.activeElement === null)) {
                             element.focus({ preventScroll: true });
                           }
@@ -59186,6 +59208,10 @@ function DocxEditorViewer({
                     },
                     onBeforeInput: (event) => {
                       editingIntentContinuationRef.current = void 0;
+                      if (wrappedParagraphPendingSelectionRef.current?.locationKey === locationKey) {
+                        wrappedParagraphPendingSelectionRef.current = void 0;
+                      }
+                      wrappedTextareaFocusGenerationRef.current += 1;
                       const input = event.nativeEvent;
                       wrappedParagraphInputHintRef.current = {
                         locationKey,
@@ -65036,14 +65062,12 @@ ${currentText.slice(end)}`;
                                   );
                                   const offText = (event.button === 0 || event.button === void 0) && !event.shiftKey && !pointerTargetElement?.closest("button,input,select,a,[role='button']") && !eventTargetIsNestedTableParagraphEditor(event.target) && (!pointerHost || pointerHost === pointerTargetElement || !pointerTargetElement?.textContent);
                                   if (offText && pointerTargetElement) {
-                                    const cellRoot = event.currentTarget.querySelector(
-                                      `[data-docx-cell-key='${cellElementKey}']`
-                                    );
+                                    const cellTd = event.currentTarget;
                                     const hosts = Array.from(
-                                      cellRoot?.querySelectorAll(
-                                        ":scope > [data-docx-table-paragraph-index]"
-                                      ) ?? []
-                                    );
+                                      cellTd.querySelectorAll(
+                                        `[data-docx-paragraph-kind='table-cell'][data-docx-table-index='${nodeIndex}'][data-docx-row-index='${rowIndex}'][data-docx-cell-index='${cellIndex}'][data-docx-table-paragraph-index]`
+                                      )
+                                    ).filter((host) => host.closest("td") === cellTd);
                                     const distance = (element) => {
                                       const box = element.getBoundingClientRect();
                                       return event.clientY < box.top ? box.top - event.clientY : event.clientY > box.bottom ? event.clientY - box.bottom : 0;
