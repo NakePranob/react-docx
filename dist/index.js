@@ -34303,9 +34303,9 @@ function nextOrderedListItemText(currentText, nextItemText) {
   const nextNumber = Number.isFinite(currentNumber) ? Math.max(1, currentNumber + 1) : 1;
   return `${leadingWhitespace}${nextNumber}. ${stripListPrefix(nextItemText)}`;
 }
-function textWithListType(text, listType) {
+function textWithListType(text, listType, ordinal = 1) {
   const normalized = stripListPrefix(text);
-  return listType === "unordered" ? `\u2022 ${normalized}` : `1. ${normalized}`;
+  return listType === "unordered" ? `\u2022 ${normalized}` : `${ordinal}. ${normalized}`;
 }
 function cloneParagraphBorderStyle(border) {
   return border ? { ...border } : void 0;
@@ -40729,6 +40729,9 @@ function useDocxEditor(options = {}) {
         );
         let next = cloneDocModel(current);
         let changed = false;
+        const firstLocation = paragraphsWithLocation[0]?.location;
+        const lineAbove = firstLocation?.kind === "paragraph" ? current.nodes[firstLocation.nodeIndex - 1] : void 0;
+        let ordinal = (lineAbove?.type === "paragraph" ? Number(/^(\d+)\.\s/.exec(paragraphText2(lineAbove))?.[1] ?? 0) : 0) + 1;
         for (const { location } of paragraphsWithLocation) {
           const { paragraph, tableNode } = getParagraphAtLocation(
             next,
@@ -40766,7 +40769,7 @@ function useDocxEditor(options = {}) {
             }
             continue;
           }
-          const nextText = textWithListType(currentText, listType);
+          const nextText = textWithListType(currentText, listType, ordinal++);
           if (nextText === currentText) {
             continue;
           }
@@ -66376,6 +66379,32 @@ ${currentText.slice(end)}`;
               "data-docx-page-wrapper": "true",
               "data-docx-page-index": pageIndex,
               "data-index": pageIndex,
+              onPointerDown: (event) => {
+                const target = event.target;
+                if (isReadOnly || event.button !== 0 || event.shiftKey || !(target instanceof Element) || target.closest(
+                  "[data-docx-paragraph-node-index],table,img,svg,button,input,textarea,[data-docx-image-location],[data-image-resize-handle='true'],[data-docx-table-move-handle='true']"
+                )) {
+                  return;
+                }
+                const hosts = Array.from(
+                  event.currentTarget.querySelectorAll(
+                    "[data-docx-paragraph-kind='paragraph'][data-docx-paragraph-node-index]"
+                  )
+                ).filter((host2) => !host2.closest("td"));
+                const above = hosts.filter(
+                  (host2) => host2.getBoundingClientRect().top <= event.clientY
+                );
+                const host = above[above.length - 1] ?? hosts[0];
+                const nodeIndex = Number(host?.dataset.docxParagraphNodeIndex);
+                const node = Number.isInteger(nodeIndex) ? editor.model.nodes[nodeIndex] : void 0;
+                if (!host || node?.type !== "paragraph") return;
+                event.preventDefault();
+                setActiveWrappedParagraphSession(void 0);
+                focusParagraphAtOffset(
+                  nodeIndex,
+                  host.getBoundingClientRect().bottom <= event.clientY ? paragraphText2(node).length : 0
+                );
+              },
               style: {
                 position: "relative",
                 width: pageWrapperWidthPx,
