@@ -57943,8 +57943,14 @@ function DocxEditorViewer({
       }
       if (nodes[nodeIndex - 1]?.type === "table" && nodes[nodeIndex + 1]?.type === "table") {
         const spacing = node.style?.spacing;
-        if (spacing?.lineRule === "exact" && (spacing.lineTwips ?? 0) <= HAIRLINE_TWIPS) {
-          return false;
+        const hairline = spacing?.lineRule === "exact" && (spacing.lineTwips ?? 0) <= HAIRLINE_TWIPS;
+        if (hairline) {
+          setActiveWrappedParagraphSession(void 0);
+          editor.applyModelChange((current) => ({
+            ...current,
+            nodes: current.nodes.filter((_4, index) => index !== nodeIndex)
+          }));
+          return true;
         }
         setActiveWrappedParagraphSession(void 0);
         editor.applyModelChange((current) => ({
