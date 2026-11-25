@@ -50520,12 +50520,20 @@ export function DocxEditorViewer({
       ) {
         return false;
       }
-      // THUNDER: between two tables the paragraph shrinks to a 1pt line
-      // instead: two tables with nothing between them are one table to Word.
+      // THUNDER: between two tables the first press shrinks the paragraph to
+      // a 1pt line — two tables with nothing between them read as one table
+      // in Word — and a second takes the line out too, for a sheet whose
+      // tables are drawn straight one under the other (the cover sheet).
       if (nodes[nodeIndex - 1]?.type === "table" && nodes[nodeIndex + 1]?.type === "table") {
         const spacing = node.style?.spacing;
-        if (spacing?.lineRule === "exact" && (spacing.lineTwips ?? 0) <= HAIRLINE_TWIPS) {
-          return false;
+        const hairline = spacing?.lineRule === "exact" && (spacing.lineTwips ?? 0) <= HAIRLINE_TWIPS;
+        if (hairline) {
+          setActiveWrappedParagraphSession(undefined);
+          editor.applyModelChange((current) => ({
+            ...current,
+            nodes: current.nodes.filter((_, index) => index !== nodeIndex),
+          }));
+          return true;
         }
         setActiveWrappedParagraphSession(undefined);
         editor.applyModelChange((current) => ({
