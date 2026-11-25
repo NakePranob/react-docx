@@ -22103,6 +22103,7 @@ function formFieldDisplayValue2(field) {
       return field.value ?? "";
   }
 }
+var HAIRLINE_TWIPS = 20;
 function splitInSource(drawn, source, text, start, end) {
   const moved = drawn?.type === "paragraph" && source?.type === "paragraph" && drawn !== source && drawn.children.some(isLockedField) ? offsetsInSource(drawn, source, [start, end]) : void 0;
   return moved ? [moved.text, moved.offsets[0], moved.offsets[1]] : [text, start, end];
@@ -53252,6 +53253,28 @@ function DocxEditorViewer({
       const node = nodes[nodeIndex];
       if (isReadOnly || node?.type !== "paragraph" || paragraphText2(node) !== "" || node.children.some((child) => child.type !== "text") || nodeIndex >= nodes.length - 1 || nodes[nodeIndex - 1]?.type !== "table" && nodes[nodeIndex + 1]?.type !== "table") {
         return false;
+      }
+      if (nodes[nodeIndex - 1]?.type === "table" && nodes[nodeIndex + 1]?.type === "table") {
+        const spacing = node.style?.spacing;
+        if (spacing?.lineRule === "exact" && (spacing.lineTwips ?? 0) <= HAIRLINE_TWIPS) {
+          return false;
+        }
+        setActiveWrappedParagraphSession(void 0);
+        editor.applyModelChange((current) => ({
+          ...current,
+          nodes: current.nodes.map(
+            (current2, index) => index === nodeIndex && current2.type === "paragraph" ? {
+              ...current2,
+              children: [],
+              style: {
+                ...current2.style,
+                spacing: { beforeTwips: 0, afterTwips: 0, lineTwips: HAIRLINE_TWIPS, lineRule: "exact" }
+              },
+              paragraphMarkStyle: { ...current2.paragraphMarkStyle, fontSizePt: 1, fontSizeCsPt: 1 }
+            } : current2
+          )
+        }));
+        return true;
       }
       setActiveWrappedParagraphSession(void 0);
       editor.applyModelChange((current) => ({
