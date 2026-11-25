@@ -24651,9 +24651,9 @@ function nextOrderedListItemText(
   return `${leadingWhitespace}${nextNumber}. ${stripListPrefix(nextItemText)}`;
 }
 
-function textWithListType(text: string, listType: DocxListType): string {
+function textWithListType(text: string, listType: DocxListType, ordinal = 1): string {
   const normalized = stripListPrefix(text);
-  return listType === "unordered" ? `• ${normalized}` : `1. ${normalized}`;
+  return listType === "unordered" ? `• ${normalized}` : `${ordinal}. ${normalized}`;
 }
 
 function cloneParagraphBorderStyle(
@@ -33442,6 +33442,17 @@ export function useDocxEditor(
 
         let next = cloneDocModel(current);
         let changed = false;
+        // THUNDER: the paragraphs of one numbered list count up, carrying on
+        // from a numbered line just above — each was given "1." before.
+        const firstLocation = paragraphsWithLocation[0]?.location;
+        const lineAbove =
+          firstLocation?.kind === "paragraph"
+            ? current.nodes[firstLocation.nodeIndex - 1]
+            : undefined;
+        let ordinal =
+          (lineAbove?.type === "paragraph"
+            ? Number(/^(\d+)\.\s/.exec(paragraphText(lineAbove))?.[1] ?? 0)
+            : 0) + 1;
         for (const { location } of paragraphsWithLocation) {
           const { paragraph, tableNode } = getParagraphAtLocation(
             next,
@@ -33482,7 +33493,7 @@ export function useDocxEditor(
             continue;
           }
 
-          const nextText = textWithListType(currentText, listType);
+          const nextText = textWithListType(currentText, listType, ordinal++);
           if (nextText === currentText) {
             continue;
           }
@@ -67085,6 +67096,44 @@ export function DocxEditorViewer({
             data-docx-page-wrapper="true"
             data-docx-page-index={pageIndex}
             data-index={pageIndex}
+            onPointerDown={(event) => {
+              // THUNDER: a click on the page off the text — below the last
+              // line, as on a blank page — puts the caret at the end of the
+              // nearest line above it, as Word does; nothing caught it, and
+              // what was typed next went nowhere.
+              const target = event.target;
+              if (
+                isReadOnly ||
+                event.button !== 0 ||
+                event.shiftKey ||
+                !(target instanceof Element) ||
+                target.closest(
+                  "[data-docx-paragraph-node-index],table,img,svg,button,input,textarea,[data-docx-image-location],[data-image-resize-handle='true'],[data-docx-table-move-handle='true']"
+                )
+              ) {
+                return;
+              }
+              const hosts = Array.from(
+                event.currentTarget.querySelectorAll<HTMLElement>(
+                  "[data-docx-paragraph-kind='paragraph'][data-docx-paragraph-node-index]"
+                )
+              ).filter((host) => !host.closest("td"));
+              const above = hosts.filter(
+                (host) => host.getBoundingClientRect().top <= event.clientY
+              );
+              const host = above[above.length - 1] ?? hosts[0];
+              const nodeIndex = Number(host?.dataset.docxParagraphNodeIndex);
+              const node = Number.isInteger(nodeIndex) ? editor.model.nodes[nodeIndex] : undefined;
+              if (!host || node?.type !== "paragraph") return;
+              event.preventDefault();
+              setActiveWrappedParagraphSession(undefined);
+              focusParagraphAtOffset(
+                nodeIndex,
+                host.getBoundingClientRect().bottom <= event.clientY
+                  ? paragraphText(node).length
+                  : 0
+              );
+            }}
             style={{
               position: "relative",
               width: pageWrapperWidthPx,
