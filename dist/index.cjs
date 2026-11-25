@@ -47201,6 +47201,26 @@ function DocxEditorViewer({
   React9.useEffect(() => {
     reportTableCellSelection?.(tableCellSelectionRange);
   }, [reportTableCellSelection, tableCellSelectionRange]);
+  const selectedTableShape = (() => {
+    const table = tableCellSelectionRange ? editor.model.nodes[tableCellSelectionRange.tableIndex] : void 0;
+    return table?.type === "table" ? table.rows.map(
+      (row) => row.cells.map((cell) => `${cell.style?.gridSpan ?? 1}x${cell.style?.rowSpan ?? 1}`).join(",")
+    ).join("|") : "";
+  })();
+  const selectedTableShapeRef = React9.useRef(void 0);
+  React9.useLayoutEffect(() => {
+    const kept = selectedTableShapeRef.current;
+    if (!tableCellSelectionRange) {
+      selectedTableShapeRef.current = void 0;
+      return;
+    }
+    if (kept?.range === tableCellSelectionRange && kept.shape !== selectedTableShape) {
+      selectedTableShapeRef.current = void 0;
+      setTableCellSelectionRange(void 0);
+      return;
+    }
+    selectedTableShapeRef.current = { range: tableCellSelectionRange, shape: selectedTableShape };
+  }, [tableCellSelectionRange, selectedTableShape]);
   const [tableMoveDropPreview, setTableMoveDropPreview] = React9.useState();
   const [objectWrapDragPreview, setObjectWrapDragPreview] = React9.useState();
   const objectDragCleanupRef = React9.useRef(void 0);
@@ -52466,9 +52486,12 @@ function DocxEditorViewer({
     [editor, typography?.enableOpenTypeFeatures, typography?.adjustLineHeightInTable]
   );
   const focusWrappedParagraphTextarea = React9.useCallback(() => {
-    scheduleDomWrite(() => {
+    const write = (attempt) => {
       const textarea = wrappedParagraphTextareaRef.current;
       if (!textarea || !textarea.isConnected) {
+        if (attempt < 10) {
+          window.requestAnimationFrame(() => scheduleDomWrite(() => write(attempt + 1)));
+        }
         return;
       }
       const pendingSelection = wrappedParagraphPendingSelectionRef.current;
@@ -52480,10 +52503,13 @@ function DocxEditorViewer({
         text: session.text,
         anchorOffset: session.anchorOffset
       } : void 0;
-      if (!selectionSource || compositionActiveRef.current || document.activeElement === textarea && !pendingSelection || normalizeTextareaText(selectionSource.text) !== textarea.value) {
+      if (!selectionSource || compositionActiveRef.current || document.activeElement === textarea && !pendingSelection) {
         return;
       }
-      if (textarea.closest("[data-docx-wrapped-paragraph-root='true']")?.getAttribute("data-docx-wrapped-paragraph-location-key") !== selectionSource.locationKey) {
+      if (normalizeTextareaText(selectionSource.text) !== textarea.value || textarea.closest("[data-docx-wrapped-paragraph-root='true']")?.getAttribute("data-docx-wrapped-paragraph-location-key") !== selectionSource.locationKey) {
+        if (attempt < 10) {
+          window.requestAnimationFrame(() => scheduleDomWrite(() => write(attempt + 1)));
+        }
         return;
       }
       if (document.activeElement !== textarea) {
@@ -52513,7 +52539,8 @@ function DocxEditorViewer({
         }
       } catch {
       }
-    });
+    };
+    scheduleDomWrite(() => write(0));
   }, [activeWrappedParagraphSession]);
   const commitWrappedParagraphTextAtLocation = React9.useCallback(
     (location, text) => {
@@ -54730,8 +54757,8 @@ function DocxEditorViewer({
           return;
         }
         const cellElement = tableCellEditorElementsRef.current.get(cellDraftKey);
-        if (!cellElement) {
-          if (attempt < 6) {
+        if (!cellElement || !cellElement.isConnected) {
+          if (attempt < 30) {
             window.requestAnimationFrame(() => focusAttempt(attempt + 1));
           }
           return;
@@ -54756,6 +54783,14 @@ function DocxEditorViewer({
           safeOffset,
           safeOffset
         );
+        const watch = (frames) => {
+          if (cellElement.isConnected && document.activeElement !== document.body) {
+            if (frames > 0) window.requestAnimationFrame(() => watch(frames - 1));
+            return;
+          }
+          if (attempt < 30) focusAttempt(attempt + 1);
+        };
+        window.requestAnimationFrame(() => watch(10));
       };
       window.requestAnimationFrame(() => focusAttempt(0));
     },
@@ -58780,6 +58815,17 @@ function DocxEditorViewer({
         anchorOffset,
         caretAffinity: hit.affinity
       });
+      if (location.kind === "table-cell" && !event.shiftKey) {
+        (0, import_react_dom2.flushSync)(() => {
+          editor.selectTableCell(location.tableIndex, location.rowIndex, location.cellIndex);
+        });
+        focusTableCellParagraphAtOffset(
+          `${location.tableIndex}:${location.rowIndex}:${location.cellIndex}`,
+          location.paragraphIndex,
+          offset
+        );
+        return;
+      }
       focusWrappedParagraphTextarea();
     };
     let registeredSurfaceElement = null;
@@ -58887,6 +58933,18 @@ function DocxEditorViewer({
           focusWrappedParagraphTextarea();
           event.preventDefault();
           event.stopPropagation();
+          if (location.kind === "table-cell" && !pointIsWithinSelection) {
+            clearTableCellSelection();
+            openTableContextMenu(
+              {
+                tableIndex: location.tableIndex,
+                rowIndex: location.rowIndex,
+                cellIndex: location.cellIndex
+              },
+              { x: event.clientX, y: event.clientY }
+            );
+            return;
+          }
           openContextMenu(
             {
               kind: "text",
@@ -59069,6 +59127,9 @@ function DocxEditorViewer({
                         }
                         if (element) {
                           registeredTextareaElement = element;
+                          if (!isReadOnly && !compositionActiveRef.current && (document.activeElement === document.body || document.activeElement === null)) {
+                            element.focus({ preventScroll: true });
+                          }
                           const pendingSelection = wrappedParagraphPendingSelectionRef.current;
                           const safeStart = Math.max(
                             0,
@@ -64970,6 +65031,59 @@ ${currentText.slice(end)}`;
                                       `[data-docx-cell-key='${cellElementKey}']`
                                     )
                                   );
+                                  const pointerHost = pointerTargetElement?.closest(
+                                    "[data-docx-table-paragraph-index]"
+                                  );
+                                  const offText = (event.button === 0 || event.button === void 0) && !event.shiftKey && !pointerTargetElement?.closest("button,input,select,a,[role='button']") && !eventTargetIsNestedTableParagraphEditor(event.target) && (!pointerHost || pointerHost === pointerTargetElement || !pointerTargetElement?.textContent);
+                                  if (offText && pointerTargetElement) {
+                                    const cellRoot = event.currentTarget.querySelector(
+                                      `[data-docx-cell-key='${cellElementKey}']`
+                                    );
+                                    const hosts = Array.from(
+                                      cellRoot?.querySelectorAll(
+                                        ":scope > [data-docx-table-paragraph-index]"
+                                      ) ?? []
+                                    );
+                                    const distance = (element) => {
+                                      const box = element.getBoundingClientRect();
+                                      return event.clientY < box.top ? box.top - event.clientY : event.clientY > box.bottom ? event.clientY - box.bottom : 0;
+                                    };
+                                    const nearest = pointerHost ?? hosts.reduce(
+                                      (best, host) => !best || distance(host) < distance(best) ? host : best,
+                                      void 0
+                                    );
+                                    const paragraphIndex = Number(
+                                      nearest?.getAttribute("data-docx-table-paragraph-index")
+                                    );
+                                    if (nearest && Number.isInteger(paragraphIndex)) {
+                                      const textLength = nearest.textContent?.length ?? 0;
+                                      const range = document.createRange();
+                                      range.selectNodeContents(nearest);
+                                      const textBox = range.getBoundingClientRect();
+                                      const offset = textLength > 0 && event.clientX < textBox.left && event.clientY <= nearest.getBoundingClientRect().bottom ? 0 : textLength;
+                                      event.preventDefault();
+                                      pendingTableCellFocusRef.current = void 0;
+                                      setActiveWrappedParagraphSession(void 0);
+                                      suppressNextTableCellClickRef.current = true;
+                                      (0, import_react_dom2.flushSync)(() => {
+                                        editor.selectTableCell(nodeIndex, rowIndex, cellIndex);
+                                      });
+                                      beginTableCellSelectionDrag(
+                                        event.pointerId,
+                                        { tableIndex: nodeIndex, rowIndex, cellIndex },
+                                        event.clientX,
+                                        event.clientY,
+                                        void 0,
+                                        true
+                                      );
+                                      focusTableCellParagraphAtOffset(
+                                        `${nodeIndex}:${rowIndex}:${cellIndex}`,
+                                        paragraphIndex,
+                                        offset
+                                      );
+                                      return;
+                                    }
+                                  }
                                   if (pointerInsideEditableCell) {
                                     pendingTableCellFocusRef.current = void 0;
                                     if (event.button === 0 || event.button === void 0) {
@@ -65468,6 +65582,9 @@ ${currentText.slice(end)}`;
                                           return;
                                         }
                                         if (event.detail > 1) {
+                                          return;
+                                        }
+                                        if (suppressNextTableCellClickRef.current) {
                                           return;
                                         }
                                         const cellElement = event.currentTarget;
