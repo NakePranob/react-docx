@@ -5940,6 +5940,21 @@ function formFieldDisplayValue(field: FormFieldRunNode): string {
  * sample in place of its value; split as the document's, that drawn text put
  * the sample into the paragraph as plain text.
  */
+/** THUNDER: nodes inserted where a style is pending (bold pressed with no
+ * text yet) take it, as typed text does — a variable put in after pressing
+ * ตัวหนา came out plain. */
+function withPendingStyle(
+  nodes: ParagraphNode["children"] | undefined,
+  pending: TextRunNode["style"] | undefined
+): ParagraphNode["children"] | undefined {
+  if (!nodes || !pending || Object.keys(pending).length === 0) return nodes;
+  return nodes.map((node) =>
+    node.type === "text" || node.type === "form-field"
+      ? ({ ...node, style: { ...(node.style ?? {}), ...pending } } as typeof node)
+      : node
+  );
+}
+
 let wordSegmenter: Intl.Segmenter | undefined;
 
 /** THUNDER: the word around an offset — Thai words too, which no space
@@ -51533,7 +51548,13 @@ export function DocxEditorViewer({
         let { start, end } = range;
         let inserted: string | ParagraphNode["children"];
         if (editIntent.kind === "insertText" || editIntent.kind === "replaceText") {
-          inserted = inlineNodesFromTextRef.current?.(editIntent.text) ?? editIntent.text;
+          inserted =
+            withPendingStyle(inlineNodesFromTextRef.current?.(editIntent.text), editor.pendingRunStyle) ??
+            // A style pressed with nothing typed yet (ตัวหนา after a
+            // variable) is the text's, not the neighbouring run's.
+            (editor.pendingRunStyle && Object.keys(editor.pendingRunStyle).length > 0
+              ? [{ type: "text" as const, text: editIntent.text, style: cloneTextStyle(editor.pendingRunStyle) }]
+              : editIntent.text);
         } else if (editIntent.kind === "insertLineBreak") {
           inserted = "\n";
         } else if (editIntent.kind === "deleteRange") {
@@ -56139,7 +56160,7 @@ export function DocxEditorViewer({
                   }
                   const insertedText = nextText.slice(head, nextText.length - tail);
                   const nodes = insertedText
-                    ? inlineNodesFromTextRef.current?.(insertedText)
+                    ? withPendingStyle(inlineNodesFromTextRef.current?.(insertedText), editor.pendingRunStyle)
                     : undefined;
                   const paragraph = nodes
                     ? getParagraphAtLocation(editor.model, location).paragraph
@@ -65242,8 +65263,12 @@ export function DocxEditorViewer({
                       // their text and take the clicks meant for it, so it
                       // leaves at least 8px of the shorter adjacent row free.
                       // Rows of 24px or more keep the full hit area.
+                      // THUNDER: 8px, not 16: across a row border, Word's
+                      // zone is a few pixels; 8px either side of the line
+                      // took a click into the top of a cell, the caret stayed
+                      // in the row above, and what was typed went there.
                       const hitSizePx = Math.min(
-                        TABLE_RESIZE_HANDLE_HIT_SIZE,
+                        8,
                         Math.max(
                           6,
                           Math.floor(
