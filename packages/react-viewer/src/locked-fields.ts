@@ -98,19 +98,27 @@ export function editAroundLockedFields(
   if (spans.length === 0 && typeof inserted === "string") return undefined;
 
   // Inserted text takes the style of the text it follows, as typing does.
+  // (An unstyled run it follows counts: its next run's style does not.) At
+  // the end, after a field, it takes the field's.
   let insertedStyle: TextRunNode["style"];
+  let styleFound = false;
+  let styleBefore: TextRunNode["style"];
   offset = 0;
   for (let index = 0; index < paragraph.children.length; index++) {
     const child = paragraph.children[index];
     const length = (pieces[index] as string).length;
     if (child.type === "text" && offset < editStart && editStart <= offset + length) {
       insertedStyle = child.style;
+      styleFound = true;
     }
-    if (insertedStyle === undefined && offset >= editStart && child.type !== "image") {
+    if (!styleFound && offset >= editStart && child.type !== "image") {
       insertedStyle = child.style;
+      styleFound = true;
     }
+    if (child.type !== "image" && offset + length <= editStart) styleBefore = child.style;
     offset += length;
   }
+  if (!styleFound) insertedStyle = styleBefore;
   const insertion: ParagraphChild[] =
     typeof inserted === "string"
       ? inserted
@@ -157,7 +165,7 @@ export function editAroundLockedFields(
   });
   place();
 
-  return { children, caret: editStart + insertedLength(insertion) };
+  return { children: mergeTextRuns(children), caret: editStart + insertedLength(insertion) };
 }
 
 /**
@@ -247,5 +255,22 @@ export function joinParagraphChildren(
 ): ParagraphChild[] {
   const all = [...first, ...second];
   const kept = all.filter((child) => child.type !== "text" || child.text.length > 0);
-  return kept.length > 0 ? kept : all.slice(0, 1);
+  return kept.length > 0 ? mergeTextRuns(kept) : all.slice(0, 1);
+}
+
+/** Neighbouring text runs that differ only in their text, joined into one —
+ * typed text went in as a run of its own per keystroke. */
+export function mergeTextRuns(children: ParagraphChild[]): ParagraphChild[] {
+  const sameButText = (a: TextRunNode, b: TextRunNode) =>
+    JSON.stringify({ ...a, text: "" }) === JSON.stringify({ ...b, text: "" });
+  const merged: ParagraphChild[] = [];
+  for (const child of children) {
+    const last = merged[merged.length - 1];
+    if (child.type === "text" && last?.type === "text" && sameButText(last, child)) {
+      merged[merged.length - 1] = { ...last, text: last.text + child.text };
+    } else {
+      merged.push(child);
+    }
+  }
+  return merged;
 }

@@ -5,6 +5,7 @@ import {
   editAroundLockedFields,
   editableTextLength,
   joinParagraphChildren,
+  mergeTextRuns,
 } from "../../packages/react-viewer/src/locked-fields";
 
 // THUNDER: locked text fields edit as one unit (the template editor's chips).
@@ -48,13 +49,13 @@ describe("editAroundLockedFields", () => {
 
   it("typing inside a chip lands after it, the chip intact", () => {
     const edit = editAroundLockedFields(sample, text, chipStart + 2, chipStart + 2, "บาท");
-    expect(shape(edit!.children)).toEqual(["ยอด ", "[จำนวน]", "บาท", " บาท"]);
+    expect(shape(edit!.children)).toEqual(["ยอด ", "[จำนวน]", "บาท บาท"]);
     expect(edit!.caret).toBe(chipEnd + 3);
   });
 
   it("typing over a selection that covers part of a chip replaces the whole chip", () => {
     const edit = editAroundLockedFields(sample, text, 2, chipStart + 1, "X");
-    expect(shape(edit!.children)).toEqual(["ยอ", "X", " บาท"]);
+    expect(shape(edit!.children)).toEqual(["ยอX", " บาท"]);
   });
 
   it("places plain text by offset, even where it reads like a chip's label", () => {
@@ -89,12 +90,12 @@ describe("joinParagraphChildren", () => {
     expect(shape(joined)).toEqual(["วันที่ ", "[date]", "เลขที่ ", "[number]"]);
   });
 
-  it("drops empty runs", () => {
+  it("drops empty runs, and joins runs that meet with the same style", () => {
     const joined = joinParagraphChildren(
       [{ type: "text", text: "" }, chip("a"), { type: "text", text: "x" }],
       [{ type: "text", text: "y" }]
     );
-    expect(shape(joined)).toEqual(["[a]", "x", "y"]);
+    expect(shape(joined)).toEqual(["[a]", "xy"]);
   });
 
   it("keeps one run when both paragraphs are empty", () => {
@@ -105,5 +106,41 @@ describe("joinParagraphChildren", () => {
 describe("editableTextLength", () => {
   it("counts text runs and chips as drawn", () => {
     expect(editableTextLength(sample)).toBe(text.length);
+  });
+});
+
+describe("typing next to a chip", () => {
+  it("joins typed text to the run it follows", () => {
+    let current = sample;
+    let currentText = text;
+    for (const [index, key] of ["ก", "ข"].entries()) {
+      const edit = editAroundLockedFields(current, currentText, chipEnd + 4 + index, chipEnd + 4 + index, key);
+      current = paragraph(edit!.children);
+      currentText = currentText + key;
+    }
+    expect(shape(current.children)).toEqual(["ยอด ", "[จำนวน]", " บาทกข"]);
+  });
+
+  it("joins text typed after a chip that ends the paragraph into one run", () => {
+    let current = paragraph([{ type: "text", text: "ef" }, chip("ชื่อ")]);
+    for (const key of ["g", "h", "i"]) {
+      const at = editableTextLength(current);
+      current = paragraph(editAroundLockedFields(current, "ef" + "ชื่อ" + current.children.slice(2).map((c) => (c.type === "text" ? c.text : "")).join(""), at, at, key)!.children);
+    }
+    expect(shape(current.children)).toEqual(["ef", "[ชื่อ]", "ghi"]);
+  });
+
+  it("does not join runs of different styles", () => {
+    expect(
+      shape(mergeTextRuns([{ type: "text", text: "a" }, { type: "text", text: "b", style: { bold: true } }]))
+    ).toEqual(["a", "b"]);
+  });
+});
+
+describe("style of typed text", () => {
+  it("after a chip that ends the paragraph takes the chip's style", () => {
+    const styled = paragraph([{ type: "text", text: "ef" }, { ...chip("ชื่อ"), style: { fontFamily: "TH SarabunPSK" } }]);
+    const edit = editAroundLockedFields(styled, "efชื่อ", 6, 6, "g");
+    expect(edit!.children[2]).toEqual({ type: "text", text: "g", style: { fontFamily: "TH SarabunPSK" } });
   });
 });
