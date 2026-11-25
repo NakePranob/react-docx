@@ -23648,6 +23648,12 @@ function formFieldDisplayValue2(field) {
       return field.value ?? "";
   }
 }
+function withPendingStyle(nodes, pending) {
+  if (!nodes || !pending || Object.keys(pending).length === 0) return nodes;
+  return nodes.map(
+    (node) => node.type === "text" || node.type === "form-field" ? { ...node, style: { ...node.style ?? {}, ...pending } } : node
+  );
+}
 var wordSegmenter2;
 function wordAroundOffset(text, offset) {
   wordSegmenter2 ??= new Intl.Segmenter("th", { granularity: "word" });
@@ -55629,7 +55635,9 @@ function DocxEditorViewer({
         let { start, end } = range;
         let inserted;
         if (editIntent.kind === "insertText" || editIntent.kind === "replaceText") {
-          inserted = inlineNodesFromTextRef.current?.(editIntent.text) ?? editIntent.text;
+          inserted = withPendingStyle(inlineNodesFromTextRef.current?.(editIntent.text), editor.pendingRunStyle) ?? // A style pressed with nothing typed yet (ตัวหนา after a
+          // variable) is the text's, not the neighbouring run's.
+          (editor.pendingRunStyle && Object.keys(editor.pendingRunStyle).length > 0 ? [{ type: "text", text: editIntent.text, style: cloneTextStyle4(editor.pendingRunStyle) }] : editIntent.text);
         } else if (editIntent.kind === "insertLineBreak") {
           inserted = "\n";
         } else if (editIntent.kind === "deleteRange") {
@@ -59318,7 +59326,7 @@ function DocxEditorViewer({
                           tail += 1;
                         }
                         const insertedText = nextText.slice(head, nextText.length - tail);
-                        const nodes = insertedText ? inlineNodesFromTextRef.current?.(insertedText) : void 0;
+                        const nodes = insertedText ? withPendingStyle(inlineNodesFromTextRef.current?.(insertedText), editor.pendingRunStyle) : void 0;
                         const paragraph = nodes ? getParagraphAtLocation(editor.model, location).paragraph : void 0;
                         const placed = paragraph && nodes ? editAroundLockedFields(paragraph, before, head, before.length - tail, nodes) : void 0;
                         if (placed && editor.commitParagraphChildrenAtRange(location, placed.children, placed.caret)) {
@@ -66360,7 +66368,7 @@ ${currentText.slice(end)}`;
                   const isHovered = hoveredTableResizeHandle?.tableIndex === nodeIndex && hoveredTableResizeHandle?.kind === "row" && hoveredTableResizeHandle.boundaryIndex === boundaryRowIndex;
                   const isHot = isResizing || isHovered;
                   const hitSizePx = Math.min(
-                    TABLE_RESIZE_HANDLE_HIT_SIZE,
+                    8,
                     Math.max(
                       6,
                       Math.floor(
