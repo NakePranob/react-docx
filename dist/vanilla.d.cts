@@ -1165,6 +1165,12 @@ interface DocxEditorController {
      * Indices are the table's node index and each row's cell index.
      */
     tableCellSelection?: DocxTableCellSelectionRange;
+    /**
+     * THUNDER: where `DocxEditorViewer` hands over how a range in what it draws
+     * (a `displayModel` may draw a field with another value) maps onto the
+     * document, so a style applied to a selection lands on what was selected.
+     */
+    setDisplayRangeMapper: (mapper: ((range: DocxTextRange) => DocxTextRange) | undefined) => void;
     /** THUNDER: where `DocxEditorViewer` reports its cell selection. */
     reportTableCellSelection: (range: DocxTableCellSelectionRange | undefined) => void;
     documentLoadNonce: number;

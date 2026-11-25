@@ -24562,7 +24562,7 @@ function layoutItemsWithPretextAroundExclusions(text, items, containerWidthPx, l
   trimCache(layoutByKey, LAYOUT_CACHE_MAX_ENTRIES);
   return nextLayout;
 }
-function resolveOffsetAtPoint(layout, x5, y4) {
+function resolveRawOffsetAtPoint(layout, x5, y4) {
   const textLength = layout.text?.length ?? 0;
   if (layout.lines.length === 0) {
     return 0;
@@ -24594,6 +24594,22 @@ function resolveOffsetAtPoint(layout, x5, y4) {
     }
   }
   return Math.max(0, Math.min(textLength, lastFragment.hardBreakOffset ?? lastFragment.endOffset));
+}
+function graphemeBoundaryAtOrAfter(text, offset) {
+  if (offset <= 0 || offset >= text.length) return offset;
+  graphemeSegmenter ??= new Intl.Segmenter(void 0, { granularity: "grapheme" });
+  const from = Math.max(0, offset - 8);
+  for (const { index, segment } of graphemeSegmenter.segment(text.slice(from, offset + 8))) {
+    const start = from + index;
+    const end = start + segment.length;
+    if (offset > start && offset < end) return end;
+    if (start >= offset) break;
+  }
+  return offset;
+}
+function resolveOffsetAtPoint(layout, x5, y4) {
+  const hit = resolveRawOffsetAtPoint(layout, x5, y4);
+  return layout.text ? graphemeBoundaryAtOrAfter(layout.text, hit) : hit;
 }
 function resolveCaretPositionAtPoint(layout, x5, y4) {
   const offset = resolveOffsetAtPoint(layout, x5, y4);
@@ -27855,6 +27871,17 @@ function formFieldDisplayValue2(field) {
     default:
       return field.value ?? "";
   }
+}
+var wordSegmenter2;
+function wordAroundOffset(text, offset) {
+  wordSegmenter2 ??= new Intl.Segmenter("th", { granularity: "word" });
+  for (const { index, segment, isWordLike } of wordSegmenter2.segment(text)) {
+    const end = index + segment.length;
+    if (offset >= index && (offset < end || offset === end && end === text.length)) {
+      return isWordLike ? { start: index, end } : void 0;
+    }
+  }
+  return void 0;
 }
 var HAIRLINE_TWIPS = 20;
 function splitInSource(drawn, source, text, start, end) {
@@ -45202,11 +45229,21 @@ function useDocxEditor(options = {}) {
   const suppressNextDomSelectionRestore = q2(() => {
     suppressNextDomSelectionRestoreRef.current = true;
   }, []);
+  const displayRangeMapperRef = A2(void 0);
+  const setDisplayRangeMapper = q2(
+    (mapper) => {
+      displayRangeMapperRef.current = mapper;
+    },
+    []
+  );
+  const activeRangeInDocument = (range) => range && displayRangeMapperRef.current ? displayRangeMapperRef.current(range) : range;
   const applySelectedStyleChange = q2(
     (mutator) => {
       const currentState = canonicalEditorStateRef.current;
       const textRangeSnapshot = cloneTextRange(
-        currentState.activeTextRange ?? lastInViewerActiveTextRangeRef.current
+        activeRangeInDocument(
+          activeTextRangeRef.current ?? currentState.activeTextRange ?? lastInViewerActiveTextRangeRef.current
+        )
       );
       const selectionSnapshot = textRangeSnapshot ? selectionFromTextRangeLocation(
         normalizeTextRange(textRangeSnapshot).start.location
@@ -45428,7 +45465,7 @@ function useDocxEditor(options = {}) {
   const currentSelectedRunStyleSnapshot = q2(() => {
     const currentState = canonicalEditorStateRef.current;
     const range = cloneTextRange(
-      currentState.activeTextRange ?? lastInViewerActiveTextRangeRef.current
+      activeRangeInDocument(currentState.activeTextRange ?? lastInViewerActiveTextRangeRef.current)
     );
     const styleFromSelection = runStyleForEditorSelection(
       currentState.model,
@@ -48311,6 +48348,7 @@ function useDocxEditor(options = {}) {
     applyModelChange,
     tableCellSelection,
     reportTableCellSelection,
+    setDisplayRangeMapper,
     documentLoadNonce,
     historyRevision,
     fileName,
@@ -49880,6 +49918,28 @@ function DocxEditorViewer({
     },
     [sourceEditor, tabLayoutModel, reviewDisplay, revisionDisplay]
   );
+  const drawnModelRef = A2(tabLayoutModel);
+  drawnModelRef.current = tabLayoutModel;
+  const setDisplayRangeMapper = sourceEditor.setDisplayRangeMapper;
+  h2(() => {
+    if (!displayModel || !setDisplayRangeMapper) return;
+    const onDocument = (boundary) => {
+      const location = paragraphLocationFromTextRangeLocation(boundary.location);
+      const drawn = getParagraphAtLocation(drawnModelRef.current, location).paragraph;
+      const source = getParagraphAtLocation(sourceModelRef.current, location).paragraph;
+      if (!drawn || !source || drawn === source || !drawn.children.some(isLockedField)) {
+        return boundary;
+      }
+      const moved = offsetsInSource(drawn, source, [boundary.offset]);
+      return moved ? { ...boundary, offset: moved.offsets[0] } : boundary;
+    };
+    setDisplayRangeMapper((range) => ({
+      ...range,
+      start: onDocument(range.start),
+      end: onDocument(range.end)
+    }));
+    return () => setDisplayRangeMapper(void 0);
+  }, [displayModel, setDisplayRangeMapper]);
   const fontMetricsRevision = C3(
     subscribeFontMetrics,
     getFontMetricsRevision,
@@ -62095,7 +62155,7 @@ function DocxEditorViewer({
             (event.clientX - rect.left) / zoomScale,
             (event.clientY - rect.top) / zoomScale
           );
-          const wordRange = expandOffsetToWord(textValue2, offset);
+          const wordRange = wordAroundOffset(textValue2, offset) ?? expandOffsetToWord(textValue2, offset);
           syncWrappedParagraphRange(location, wordRange.start, wordRange.end, {
             textOverride: textValue2,
             textLength: textValue2.length
