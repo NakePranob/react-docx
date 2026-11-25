@@ -4202,18 +4202,24 @@ function editAroundLockedFields(paragraph, text, start, end, inserted) {
   }
   if (spans.length === 0 && typeof inserted === "string") return void 0;
   let insertedStyle;
+  let styleFound = false;
+  let styleBefore;
   offset = 0;
   for (let index = 0; index < paragraph.children.length; index++) {
     const child = paragraph.children[index];
     const length = pieces[index].length;
     if (child.type === "text" && offset < editStart && editStart <= offset + length) {
       insertedStyle = child.style;
+      styleFound = true;
     }
-    if (insertedStyle === void 0 && offset >= editStart && child.type !== "image") {
+    if (!styleFound && offset >= editStart && child.type !== "image") {
       insertedStyle = child.style;
+      styleFound = true;
     }
+    if (child.type !== "image" && offset + length <= editStart) styleBefore = child.style;
     offset += length;
   }
+  if (!styleFound) insertedStyle = styleBefore;
   const insertion = typeof inserted === "string" ? inserted ? [{ type: "text", text: inserted, ...insertedStyle ? { style: { ...insertedStyle } } : {} }] : [] : inserted.map(
     (node) => node.type !== "image" && !node.style && insertedStyle ? { ...node, style: { ...insertedStyle } } : node
   );
@@ -4251,7 +4257,7 @@ function editAroundLockedFields(paragraph, text, start, end, inserted) {
     children.push(child);
   });
   place();
-  return { children, caret: editStart + insertedLength(insertion) };
+  return { children: mergeTextRuns(children), caret: editStart + insertedLength(insertion) };
 }
 function offsetsInSource(drawn, source, offsets) {
   if (drawn.children.length !== source.children.length) return void 0;
@@ -4298,6 +4304,27 @@ function splitAroundLockedFields(paragraph, start, end) {
     if (childStart + length > end && tail) after.push({ ...child, text: tail });
   });
   return { before, after };
+}
+function editableTextLength(paragraph) {
+  return paragraph.children.reduce((sum, child) => sum + (childEditableText(child)?.length ?? 0), 0);
+}
+function joinParagraphChildren(first, second) {
+  const all2 = [...first, ...second];
+  const kept = all2.filter((child) => child.type !== "text" || child.text.length > 0);
+  return kept.length > 0 ? mergeTextRuns(kept) : all2.slice(0, 1);
+}
+function mergeTextRuns(children) {
+  const sameButText = (a, b) => JSON.stringify({ ...a, text: "" }) === JSON.stringify({ ...b, text: "" });
+  const merged = [];
+  for (const child of children) {
+    const last = merged[merged.length - 1];
+    if (child.type === "text" && last?.type === "text" && sameButText(last, child)) {
+      merged[merged.length - 1] = { ...last, text: last.text + child.text };
+    } else {
+      merged.push(child);
+    }
+  }
+  return merged;
 }
 
 // src/editor.tsx
@@ -20071,6 +20098,17 @@ function resolveMeasuredPageContentHeightsPxForEditedModel(nodes, measuredPageCo
   }
   return validPageCount >= measuredPageContentHeightsPxByPageIndex.length ? measuredPageContentHeightsPxByPageIndex : measuredPageContentHeightsPxByPageIndex.slice(0, validPageCount);
 }
+function positionBesideLockedField(textNode, atStart) {
+  const field = textNode.parentElement?.closest("[data-docx-locked-field='true']");
+  if (!field?.parentNode) return void 0;
+  const index = Array.prototype.indexOf.call(field.parentNode.childNodes, field);
+  return { node: field.parentNode, offset: atStart ? index : index + 1 };
+}
+function caretBesideLockedField(node, offset) {
+  if (!(node instanceof Element)) return false;
+  const isField = (child) => child instanceof Element && child.matches("[data-docx-locked-field='true']");
+  return isField(node.childNodes[offset - 1]) || isField(node.childNodes[offset]);
+}
 function placeCaretInsideElementDom(element) {
   const selection = window.getSelection();
   if (!selection) {
@@ -20162,16 +20200,8 @@ function setSelectionWithinElementByTextOffsetsDom(element, startOffset, endOffs
       }
       const textLength = currentTextNode.textContent?.length ?? 0;
       if (traversed + textLength >= safeOffset) {
-        const field = currentTextNode.parentElement?.closest(
-          "[data-docx-locked-field='true']"
-        );
-        if (field?.parentNode) {
-          const index = Array.prototype.indexOf.call(field.parentNode.childNodes, field);
-          return {
-            node: field.parentNode,
-            offset: safeOffset <= traversed ? index : index + 1
-          };
-        }
+        const beside = positionBesideLockedField(currentTextNode, safeOffset <= traversed);
+        if (beside) return beside;
         return {
           node: currentTextNode,
           offset: Math.max(0, safeOffset - traversed)
@@ -22076,6 +22106,11 @@ function formFieldDisplayValue2(field) {
 function splitInSource(drawn, source, text, start, end) {
   const moved = drawn?.type === "paragraph" && source?.type === "paragraph" && drawn !== source && drawn.children.some(isLockedField) ? offsetsInSource(drawn, source, [start, end]) : void 0;
   return moved ? [moved.text, moved.offsets[0], moved.offsets[1]] : [text, start, end];
+}
+function caretAfterJoin(range, first) {
+  if (!first.children.some(isLockedField)) return range;
+  const offset = editableTextLength(first);
+  return { start: { ...range.start, offset }, end: { ...range.end, offset } };
 }
 function firstRunStyle(paragraph) {
   return textRuns2(
@@ -37885,20 +37920,15 @@ function normalizeTextRangeForModel(model, range) {
   if (!startParagraph || !endParagraph) {
     return void 0;
   }
+  const offsetIn = (paragraph, offset) => paragraph.children.some(isLockedField) ? Math.max(0, Math.round(offset)) : normalizeRangeBoundaryParagraphOffset(paragraph, offset);
   return normalizeTextRange({
     start: {
       location: cloneTextRangeLocation(startLocation),
-      offset: normalizeRangeBoundaryParagraphOffset(
-        startParagraph,
-        normalized.start.offset
-      )
+      offset: offsetIn(startParagraph, normalized.start.offset)
     },
     end: {
       location: cloneTextRangeLocation(endLocation),
-      offset: normalizeRangeBoundaryParagraphOffset(
-        endParagraph,
-        normalized.end.offset
-      )
+      offset: offsetIn(endParagraph, normalized.end.offset)
     }
   });
 }
@@ -40005,9 +40035,19 @@ function useDocxEditor(options = {}) {
           const endText = paragraphText2(endParagraph);
           const carriesStartPrefix = safeStart > 0;
           const carriesEndSuffix = safeEnd < endText.length;
-          const shouldAdoptEndParagraphStyleOnDelete = replacementText.length === 0 && !carriesStartPrefix && carriesEndSuffix;
+          const shouldAdoptEndParagraphStyleOnDelete = replacementText.length === 0 && !carriesStartPrefix && !startParagraph.children.some(isLockedField) && carriesEndSuffix;
           const canPreserveCrossParagraphRunStyles = paragraphHasOnlyTextRuns(startParagraph) && paragraphHasOnlyTextRuns(endParagraph);
-          if (canPreserveCrossParagraphRunStyles) {
+          const joinsWholeParagraphs = replacementText.length === 0 && safeStart >= startText.length && safeEnd === 0 && !canPreserveCrossParagraphRunStyles;
+          if (joinsWholeParagraphs) {
+            startParagraph.children = joinParagraphChildren(
+              startParagraph.children.map((child) => ({ ...child })),
+              endParagraph.children.map((child) => ({ ...child }))
+            );
+            startParagraph.sourceXml = void 0;
+            if (startLookup.tableNode) {
+              startLookup.tableNode.sourceXml = void 0;
+            }
+          } else if (canPreserveCrossParagraphRunStyles) {
             const startRuns = startParagraph.children.filter((child) => child.type === "text").map(cloneTextRunWithMetadata);
             const endRuns = endParagraph.children.filter((child) => child.type === "text").map(cloneTextRunWithMetadata);
             const splitStartRuns = splitTextRunsAtOffset(startRuns, safeStart);
@@ -49748,7 +49788,7 @@ function DocxEditorViewer({
           }
           const textLength = currentTextNode.textContent?.length ?? 0;
           if (traversed + textLength >= safeOffset) {
-            return {
+            return positionBesideLockedField(currentTextNode, safeOffset <= traversed) ?? {
               node: currentTextNode,
               offset: Math.max(0, safeOffset - traversed)
             };
@@ -49865,7 +49905,7 @@ function DocxEditorViewer({
         }
         const textLength = currentTextNode.textContent?.length ?? 0;
         if (traversed + textLength >= safeOffset) {
-          return {
+          return positionBesideLockedField(currentTextNode, safeOffset <= traversed) ?? {
             node: currentTextNode,
             offset: Math.max(0, safeOffset - traversed)
           };
@@ -50521,7 +50561,7 @@ function DocxEditorViewer({
     const liveSelection = window.getSelection();
     const anchorNode = liveSelection?.anchorNode ?? null;
     const collapsedElementAnchor = Boolean(
-      liveSelection && liveSelection.isCollapsed && liveSelection.rangeCount > 0 && anchorNode && anchorNode.nodeType !== Node.TEXT_NODE
+      liveSelection && liveSelection.isCollapsed && liveSelection.rangeCount > 0 && anchorNode && anchorNode.nodeType !== Node.TEXT_NODE && !caretBesideLockedField(anchorNode, liveSelection.anchorOffset)
     );
     const selectionDropped = Boolean(
       editorHasFocus && (!liveSelection || liveSelection.rangeCount === 0)
@@ -50616,7 +50656,7 @@ function DocxEditorViewer({
       liveRange && rootElement.contains(liveRange.startContainer) && rootElement.contains(liveRange.endContainer)
     );
     const anchorIsElement = Boolean(
-      anchorNode && anchorNode.nodeType !== Node.TEXT_NODE
+      anchorNode && anchorNode.nodeType !== Node.TEXT_NODE && !caretBesideLockedField(anchorNode, selection.anchorOffset)
     );
     const selectionWasDestroyed = isDomSelectionDestroyed({
       hasLiveRange: Boolean(liveRange),
@@ -51290,7 +51330,7 @@ function DocxEditorViewer({
         selectionRange.collapsed && activeElement instanceof HTMLElement && activeElement.isContentEditable && rootElement.contains(activeElement) && activeElement.contains(selectionRange.startContainer)
       );
       const selectionWithinSingleEditableHost = Boolean(
-        activeElement instanceof HTMLElement && activeElement.isContentEditable && rootElement.contains(activeElement) && activeElement.contains(selectionRange.startContainer) && activeElement.contains(selectionRange.endContainer) && selectionRange.startContainer.nodeType === Node.TEXT_NODE && selectionRange.endContainer.nodeType === Node.TEXT_NODE
+        activeElement instanceof HTMLElement && activeElement.isContentEditable && rootElement.contains(activeElement) && activeElement.contains(selectionRange.startContainer) && activeElement.contains(selectionRange.endContainer) && (selectionRange.startContainer.nodeType === Node.TEXT_NODE || caretBesideLockedField(selectionRange.startContainer, selectionRange.startOffset)) && (selectionRange.endContainer.nodeType === Node.TEXT_NODE || caretBesideLockedField(selectionRange.endContainer, selectionRange.endOffset))
       );
       if (selectionWithinSingleEditableHost && activeElement instanceof HTMLElement) {
         const host = activeElement.closest(
@@ -53086,10 +53126,9 @@ function DocxEditorViewer({
         )) {
           return;
         }
-        const element = resolveParagraphHostElementForOffset(
-          paragraphIndex,
-          offset
-        );
+        const sourceNode = sourceModelRef.current?.nodes[paragraphIndex];
+        const awaitsSurface = attempt < 20 && sourceNode?.type === "paragraph" && !sourceNode.children.some(isLockedField);
+        const element = awaitsSurface ? void 0 : resolveParagraphHostElementForOffset(paragraphIndex, offset);
         if (!element || !element.isConnected) {
           if (attempt < 30) {
             window.requestAnimationFrame(() => {
@@ -53117,7 +53156,18 @@ function DocxEditorViewer({
           window.requestAnimationFrame(() => {
             focusAttempt(attempt + 1);
           });
+          return;
         }
+        const watch = (frames) => {
+          if (element.isConnected && document.activeElement === element) {
+            if (frames > 0) window.requestAnimationFrame(() => watch(frames - 1));
+            return;
+          }
+          if (attempt < 30 && (!element.isConnected || document.activeElement === document.body)) {
+            focusAttempt(attempt + 1);
+          }
+        };
+        window.requestAnimationFrame(() => watch(10));
       };
       window.requestAnimationFrame(() => {
         focusAttempt(0);
@@ -53128,6 +53178,16 @@ function DocxEditorViewer({
       resolveParagraphHostElementForOffset,
       setSelectionWithinElementByTextOffsets
     ]
+  );
+  const syncSelectionAfterJoin = React9.useCallback(
+    (collapsedRange, first) => {
+      const range = first?.type === "paragraph" ? caretAfterJoin(collapsedRange, first) : collapsedRange;
+      syncSelectionFromDocxRange(range);
+      if (range !== collapsedRange && range.start.location.kind === "paragraph") {
+        focusParagraphAtOffset(range.start.location.nodeIndex, range.start.offset);
+      }
+    },
+    [syncSelectionFromDocxRange, focusParagraphAtOffset]
   );
   const focusTableCellParagraphAtOffset = React9.useCallback(
     (cellDraftKey, paragraphIndex, offset) => {
@@ -54089,7 +54149,7 @@ function DocxEditorViewer({
                   }
                 });
                 if (collapsedRange) {
-                  syncSelectionFromDocxRange(collapsedRange);
+                  syncSelectionAfterJoin(collapsedRange, previousParagraph);
                 }
               }
               return;
@@ -54113,7 +54173,7 @@ function DocxEditorViewer({
                   }
                 });
                 if (collapsedRange) {
-                  syncSelectionFromDocxRange(collapsedRange);
+                  syncSelectionAfterJoin(collapsedRange, editor.model.nodes[nodeIndex]);
                 }
               }
               return;
@@ -54338,7 +54398,8 @@ function DocxEditorViewer({
       isReadOnly,
       schedulePaginationMeasurementResume,
       selectionOffsetsWithinElement,
-      syncSelectionFromDocxRange
+      syncSelectionFromDocxRange,
+      syncSelectionAfterJoin
     ]
   );
   React9.useEffect(() => {
@@ -57511,6 +57572,7 @@ function DocxEditorViewer({
                       schedulePaginationMeasurementResume();
                     },
                     onBeforeInput: (event) => {
+                      editingIntentContinuationRef.current = void 0;
                       const input = event.nativeEvent;
                       wrappedParagraphInputHintRef.current = {
                         locationKey,
@@ -57637,6 +57699,7 @@ function DocxEditorViewer({
                       schedulePaginationMeasurementResume();
                     },
                     onKeyDown: (event) => {
+                      editingIntentContinuationRef.current = void 0;
                       event.stopPropagation();
                       cancelPendingPointerSelectionReconcile();
                       if (isCompositionKeyboardEvent(event)) {
@@ -57842,10 +57905,11 @@ function DocxEditorViewer({
                               }
                             });
                           });
-                          if (collapsed) {
+                          const placed = collapsed && backward ? caretAfterJoin(collapsed, targetParagraph) : collapsed;
+                          if (placed) {
                             focusParagraphLocationAtOffset(
-                              paragraphLocationFromTextRangeLocation(collapsed.start.location),
-                              collapsed.start.offset
+                              paragraphLocationFromTextRangeLocation(placed.start.location),
+                              placed.start.offset
                             );
                           }
                           return;
@@ -62283,7 +62347,7 @@ function DocxEditorViewer({
                     }
                   });
                   if (collapsedRange) {
-                    syncSelectionFromDocxRange(collapsedRange);
+                    syncSelectionAfterJoin(collapsedRange, previousParagraph);
                   }
                   return;
                 }
@@ -62309,7 +62373,7 @@ function DocxEditorViewer({
                     }
                   });
                   if (collapsedRange) {
-                    syncSelectionFromDocxRange(collapsedRange);
+                    syncSelectionAfterJoin(collapsedRange, editor.model.nodes[nodeIndex]);
                   }
                   return;
                 }
@@ -64125,6 +64189,30 @@ ${currentText.slice(end)}`;
                                               activeParagraphIndex
                                             )
                                           );
+                                          if (activeParagraph.children.some(isLockedField)) {
+                                            const sourceTable = sourceModelRef.current.nodes[nodeIndex];
+                                            const sourceParagraph = sourceTable?.type === "table" ? tableCellParagraphs(
+                                              sourceTable.rows[rowIndex]?.cells[cellIndex]?.nodes ?? []
+                                            )[activeParagraphIndex] : void 0;
+                                            const split = editor.splitParagraphAtSelection(
+                                              ...splitInSource(activeParagraph, sourceParagraph, currentText, start, end),
+                                              {
+                                                kind: "table-cell",
+                                                tableIndex: nodeIndex,
+                                                rowIndex,
+                                                cellIndex,
+                                                paragraphIndex: activeParagraphIndex
+                                              }
+                                            );
+                                            if (split) {
+                                              focusTableCellParagraphAtOffset(
+                                                cellDraftKey,
+                                                split.paragraphIndex,
+                                                split.caretOffset
+                                              );
+                                            }
+                                            return;
+                                          }
                                           editor.commitTableCellParagraphTextRecursive(
                                             nodeIndex,
                                             rowIndex,
