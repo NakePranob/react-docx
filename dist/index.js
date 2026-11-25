@@ -4253,6 +4253,52 @@ function editAroundLockedFields(paragraph, text, start, end, inserted) {
   place();
   return { children, caret: editStart + insertedLength(insertion) };
 }
+function offsetsInSource(drawn, source, offsets) {
+  if (drawn.children.length !== source.children.length) return void 0;
+  const drawnPieces = drawn.children.map(childEditableText);
+  const sourcePieces = source.children.map(childEditableText);
+  if ([...drawnPieces, ...sourcePieces].some((piece) => piece === void 0)) return void 0;
+  const moved = offsets.map((offset) => {
+    let drawnAt = 0;
+    let sourceAt = 0;
+    for (let index = 0; index < drawnPieces.length; index++) {
+      const drawnLength = drawnPieces[index].length;
+      const sourceLength = sourcePieces[index].length;
+      if (offset <= drawnAt + drawnLength) {
+        if (isLockedField(drawn.children[index])) {
+          return offset === drawnAt ? sourceAt : sourceAt + sourceLength;
+        }
+        return sourceAt + Math.min(offset - drawnAt, sourceLength);
+      }
+      drawnAt += drawnLength;
+      sourceAt += sourceLength;
+    }
+    return sourceAt;
+  });
+  return { text: sourcePieces.join(""), offsets: moved };
+}
+function splitAroundLockedFields(paragraph, start, end) {
+  if (!paragraph.children.some(isLockedField)) return void 0;
+  const pieces = paragraph.children.map(childEditableText);
+  if (pieces.some((piece) => piece === void 0)) return void 0;
+  const before = [];
+  const after = [];
+  let offset = 0;
+  paragraph.children.forEach((child, index) => {
+    const length = pieces[index].length;
+    const childStart = offset;
+    offset += length;
+    if (child.type !== "text") {
+      (childStart < start || childStart === start && length === 0 ? before : after).push(child);
+      return;
+    }
+    const head = child.text.slice(0, Math.max(0, start - childStart));
+    const tail = child.text.slice(Math.max(0, end - childStart));
+    if (childStart < start && head) before.push({ ...child, text: head });
+    if (childStart + length > end && tail) after.push({ ...child, text: tail });
+  });
+  return { before, after };
+}
 
 // src/editor.tsx
 import { renderToStaticMarkup as renderToStaticMarkup2 } from "react-dom/server";
@@ -22026,6 +22072,10 @@ function formFieldDisplayValue2(field) {
     default:
       return field.value ?? "";
   }
+}
+function splitInSource(drawn, source, text, start, end) {
+  const moved = drawn?.type === "paragraph" && source?.type === "paragraph" && drawn !== source && drawn.children.some(isLockedField) ? offsetsInSource(drawn, source, [start, end]) : void 0;
+  return moved ? [moved.text, moved.offsets[0], moved.offsets[1]] : [text, start, end];
 }
 function firstRunStyle(paragraph) {
   return textRuns2(
@@ -40971,13 +41021,19 @@ function useDocxEditor(options = {}) {
           paragraphNode.style,
           paragraphNode.sourceXml
         );
+        const atStart = firstTextStyleAtOffset(paragraphNode, safeStart, true) ?? firstRunStyle(paragraphNode);
+        const atEnd = firstTextStyleAtOffset(paragraphNode, safeEnd, false) ?? firstRunStyle(paragraphNode);
         const beforeInsertedStyle = cloneTextStyle3(
-          pendingRunStyle ?? firstTextStyleAtOffset(paragraphNode, safeStart, true) ?? firstRunStyle(paragraphNode)
+          pendingRunStyle ? { ...atStart, ...pendingRunStyle } : atStart
         );
         const inheritedRunStyle = cloneTextStyle3(
-          pendingRunStyle ?? firstTextStyleAtOffset(paragraphNode, safeEnd, false) ?? firstRunStyle(paragraphNode)
+          pendingRunStyle ? { ...atEnd, ...pendingRunStyle } : atEnd
         ) ?? {};
-        const splitChildren = splitParagraphChildrenAtTextOffsets(
+        const aroundFields = splitAroundLockedFields(paragraphNode, safeStart, safeEnd);
+        const splitChildren = aroundFields ? {
+          beforeChildren: aroundFields.before.length ? aroundFields.before : [{ type: "text", text: "", ...beforeInsertedStyle ? { style: beforeInsertedStyle } : {} }],
+          afterChildren: aroundFields.after.length ? aroundFields.after : [{ type: "text", text: "", ...Object.keys(inheritedRunStyle).length ? { style: inheritedRunStyle } : {} }]
+        } : splitParagraphChildrenAtTextOffsets(
           paragraphNode,
           normalizedDraftText,
           safeStart,
@@ -40987,6 +41043,9 @@ function useDocxEditor(options = {}) {
             afterInsertedStyle: inheritedRunStyle
           }
         );
+        const styledEmpty = (children, style) => children.length === 1 && children[0].type === "text" && children[0].text === "" && style && Object.keys(style).length > 0 ? [{ ...children[0], style: cloneTextStyle3(style) }] : children;
+        splitChildren.beforeChildren = styledEmpty(splitChildren.beforeChildren, beforeInsertedStyle);
+        splitChildren.afterChildren = styledEmpty(splitChildren.afterChildren, inheritedRunStyle);
         const originalEnding = paragraphMarkPropertiesFromTemplate(
           paragraphNode,
           true
@@ -50928,6 +50987,8 @@ function DocxEditorViewer({
     },
     [editor.model, focusWrappedParagraphTextarea, isReadOnly, syncWrappedParagraphRange, typography?.enableOpenTypeFeatures, typography?.adjustLineHeightInTable]
   );
+  const focusWrappedParagraphRangeRef = React9.useRef(focusWrappedParagraphRange);
+  focusWrappedParagraphRangeRef.current = focusWrappedParagraphRange;
   React9.useLayoutEffect(() => {
     const boundary = pendingRootCaretFocusRef.current;
     pendingRootCaretFocusRef.current = void 0;
@@ -53019,7 +53080,7 @@ function DocxEditorViewer({
   const focusParagraphAtOffset = React9.useCallback(
     (paragraphIndex, offset) => {
       const focusAttempt = (attempt) => {
-        if (focusWrappedParagraphRange(
+        if (focusWrappedParagraphRangeRef.current(
           { kind: "paragraph", nodeIndex: paragraphIndex },
           offset
         )) {
@@ -53030,7 +53091,7 @@ function DocxEditorViewer({
           offset
         );
         if (!element || !element.isConnected) {
-          if (attempt < 6) {
+          if (attempt < 30) {
             window.requestAnimationFrame(() => {
               focusAttempt(attempt + 1);
             });
@@ -53052,7 +53113,7 @@ function DocxEditorViewer({
         const selectionInsideElement = Boolean(
           range && element.contains(range.startContainer) && element.contains(range.endContainer)
         );
-        if (!selectionInsideElement && attempt < 6) {
+        if (!selectionInsideElement && attempt < 30) {
           window.requestAnimationFrame(() => {
             focusAttempt(attempt + 1);
           });
@@ -53124,6 +53185,22 @@ function DocxEditorViewer({
       );
     },
     [focusParagraphAtOffset, focusTableCellParagraphAtOffset]
+  );
+  const removeEmptyParagraphBesideTable = React9.useCallback(
+    (nodeIndex) => {
+      const nodes = editor.model.nodes;
+      const node = nodes[nodeIndex];
+      if (isReadOnly || node?.type !== "paragraph" || paragraphText2(node) !== "" || node.children.some((child) => child.type !== "text") || nodeIndex >= nodes.length - 1 || nodes[nodeIndex - 1]?.type !== "table" && nodes[nodeIndex + 1]?.type !== "table") {
+        return false;
+      }
+      setActiveWrappedParagraphSession(void 0);
+      editor.applyModelChange((current) => ({
+        ...current,
+        nodes: current.nodes.filter((_, index) => index !== nodeIndex)
+      }));
+      return true;
+    },
+    [editor, isReadOnly]
   );
   React9.useLayoutEffect(() => {
     const session = activeWrappedParagraphSession;
@@ -53933,9 +54010,7 @@ function DocxEditorViewer({
             return;
           }
           const splitParagraph = editor.splitParagraphAtSelection(
-            currentText2,
-            start,
-            end,
+            ...splitInSource(node, sourceModelRef.current.nodes[nodeIndex], currentText2, start, end),
             location
           );
           if (splitParagraph !== void 0) {
@@ -57450,6 +57525,7 @@ function DocxEditorViewer({
                     onChange: (event) => {
                       cancelPendingPointerSelectionReconcile();
                       const edit = wrappedTextareaEdit(event.currentTarget);
+                      const inputHint = wrappedParagraphInputHintRef.current;
                       wrappedParagraphInputHintRef.current = void 0;
                       const nextText = edit.source;
                       const nextStart = edit.sourceSelectionStart;
@@ -57466,6 +57542,50 @@ function DocxEditorViewer({
                       editor.beginSelectionSession("keyboard", {
                         settleAfterMs: 220
                       });
+                      const hintHere = inputHint?.locationKey === locationKey ? inputHint : void 0;
+                      if (!/^(delete|history)/.test(hintHere?.hint.inputType ?? "")) {
+                        const before = hintHere?.source ?? wrappedSessionSourceText();
+                        let head = 0;
+                        while (head < before.length && head < nextText.length && before[head] === nextText[head]) {
+                          head += 1;
+                        }
+                        let tail = 0;
+                        while (tail < before.length - head && tail < nextText.length - head && before[before.length - 1 - tail] === nextText[nextText.length - 1 - tail]) {
+                          tail += 1;
+                        }
+                        const insertedText = nextText.slice(head, nextText.length - tail);
+                        const nodes = insertedText ? inlineNodesFromTextRef.current?.(insertedText) : void 0;
+                        const paragraph = nodes ? getParagraphAtLocation(editor.model, location).paragraph : void 0;
+                        const placed = paragraph && nodes ? editAroundLockedFields(paragraph, before, head, before.length - tail, nodes) : void 0;
+                        if (placed && editor.commitParagraphChildrenAtRange(location, placed.children, placed.caret)) {
+                          setActiveWrappedParagraphSession(void 0);
+                          const placeAfterInsert = (attempt) => {
+                            const drawn = resolveParagraphHostElement(location);
+                            if (!drawn?.closest("[contenteditable='true']")) {
+                              if (attempt < 8) {
+                                window.requestAnimationFrame(() => placeAfterInsert(attempt + 1));
+                              }
+                              return;
+                            }
+                            const offset = Math.max(0, (drawn.textContent ?? "").length - tail);
+                            if (location.kind === "paragraph") {
+                              pendingEditableCaretRef.current = {
+                                nodeIndex: location.nodeIndex,
+                                start: offset,
+                                end: offset
+                              };
+                            }
+                            editor.setActiveTextRange({
+                              start: { location: cloneTextRangeLocation(location), offset },
+                              end: { location: cloneTextRangeLocation(location), offset }
+                            });
+                            focusParagraphLocationAtOffset(location, offset);
+                          };
+                          window.requestAnimationFrame(() => placeAfterInsert(0));
+                          schedulePaginationMeasurementResume();
+                          return;
+                        }
+                      }
                       commitWrappedParagraphTextAtLocation(location, nextText);
                       syncWrappedParagraphRange(location, nextStart, nextEnd, {
                         textOverride: nextText,
@@ -57695,6 +57815,10 @@ function DocxEditorViewer({
                           void 0,
                           backwards ? "upstream" : "downstream"
                         );
+                        return;
+                      }
+                      if (isPlainNavigation && !event.shiftKey && isCollapsedSelection && (event.key === "Backspace" || event.key === "Delete") && location.kind === "paragraph" && currentText === "" && removeEmptyParagraphBesideTable(location.nodeIndex)) {
+                        event.preventDefault();
                         return;
                       }
                       if (isPlainNavigation && !event.shiftKey && isCollapsedSelection && (event.key === "Backspace" && selectionStart2 === 0 || event.key === "Delete" && selectionEnd2 === currentText.length)) {
@@ -58029,7 +58153,12 @@ function DocxEditorViewer({
                       resize: "none",
                       overflow: "clip",
                       outline: "none",
-                      zIndex: 5
+                      zIndex: 5,
+                      // THUNDER: it sits 1px wide on the caret, so a click at the
+                      // caret — at a line's end, say — landed on it, and the
+                      // browser put its own caret at 0: the paragraph's start.
+                      // Clicks are the text's; this only takes the keys.
+                      pointerEvents: "none"
                     }
                   }
                 ) : null
@@ -62120,6 +62249,11 @@ function DocxEditorViewer({
                 }
               }
             }
+            if (isPlainBackspaceOrDelete && isCollapsedSelection && collapsedSelectionOffset === 0 && removeEmptyParagraphBesideTable(nodeIndex)) {
+              event.preventDefault();
+              event.stopPropagation();
+              return;
+            }
             if (isPlainBackspaceOrDelete && isCollapsedSelection && collapsedSelectionOffset >= 0) {
               if (event.key === "Backspace" && collapsedSelectionOffset === 0) {
                 let previousLocation;
@@ -62285,9 +62419,13 @@ ${currentText.slice(end)}`;
               tableCellDraftsRef.current.clear();
               tableCellParagraphDraftsRef.current.clear();
               const splitParagraph = editor.splitParagraphAtSelection(
-                currentText,
-                start,
-                end,
+                ...splitInSource(
+                  editor.model.nodes[nodeIndex],
+                  sourceModelRef.current.nodes[nodeIndex],
+                  currentText,
+                  start,
+                  end
+                ),
                 {
                   kind: "paragraph",
                   nodeIndex
@@ -63252,7 +63390,8 @@ ${currentText.slice(end)}`;
                                     },
                                     event.clientX,
                                     event.clientY,
-                                    startBoundary
+                                    startBoundary,
+                                    true
                                   );
                                   const pendingFocusBoundary = startBoundary?.location.kind === "table-cell" && startBoundary.location.tableIndex === nodeIndex && startBoundary.location.rowIndex === rowIndex && startBoundary.location.cellIndex === cellIndex ? {
                                     location: cloneTextRangeLocation(
