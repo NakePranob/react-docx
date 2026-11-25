@@ -47252,8 +47252,16 @@ export function DocxEditorViewer({
     [editor, typography?.enableOpenTypeFeatures, typography?.adjustLineHeightInTable]
   );
 
+  const wrappedTextareaFocusGenerationRef = React.useRef(0);
   const focusWrappedParagraphTextarea = React.useCallback((): void => {
+    // THUNDER: a write still waiting for the textarea gives up once anything
+    // is typed or focus is asked for again — run late, it put the caret
+    // back where the click left it, in front of what was typed.
+    const generation = ++wrappedTextareaFocusGenerationRef.current;
     const write = (attempt: number): void => {
+      if (generation !== wrappedTextareaFocusGenerationRef.current) {
+        return;
+      }
       const textarea = wrappedParagraphTextareaRef.current;
       if (!textarea || !textarea.isConnected) {
         if (attempt < 10) {
@@ -47278,7 +47286,10 @@ export function DocxEditorViewer({
       if (
         !selectionSource ||
         compositionActiveRef.current ||
-        (document.activeElement === textarea && !pendingSelection)
+        (document.activeElement === textarea && !pendingSelection) ||
+        // Typed ahead of the session: putting its selection back would
+        // move the caret behind what was just typed.
+        normalizeTextareaText(selectionSource.text) !== textarea.value
       ) {
         return;
       }
@@ -47286,7 +47297,6 @@ export function DocxEditorViewer({
       // made only once that is drawn again; bailing here left focus where
       // it was and the first keys typed went there. Wait a few frames.
       if (
-        normalizeTextareaText(selectionSource.text) !== textarea.value ||
         textarea.closest("[data-docx-wrapped-paragraph-root='true']")
           ?.getAttribute("data-docx-wrapped-paragraph-location-key") !==
           selectionSource.locationKey
@@ -50126,10 +50136,29 @@ export function DocxEditorViewer({
       modelText !== activeWrappedParagraphSession.text &&
       !activeWrappedParagraphSession.isComposing
     ) {
+      // THUNDER: when the text was typed into the focused textarea, its
+      // caret is where it is now — the session's is from before the typing,
+      // and keeping it put the caret back in front of what was typed.
+      const textarea = wrappedParagraphTextareaRef.current;
+      const typedCaret =
+        textarea &&
+        document.activeElement === textarea &&
+        normalizeTextareaText(modelText) === textarea.value
+          ? {
+              selectionStart: textareaOffsetToSourceOffset(modelText, textarea.selectionStart),
+              selectionEnd: textareaOffsetToSourceOffset(modelText, textarea.selectionEnd),
+              anchorOffset: textareaOffsetToSourceOffset(
+                modelText,
+                textarea.selectionDirection === "backward" ? textarea.selectionEnd : textarea.selectionStart
+              ),
+            }
+          : undefined;
       setActiveWrappedParagraphSession((current) =>
         current &&
         current.locationKey === activeWrappedParagraphSession.locationKey
-          ? {
+          ? typedCaret
+            ? { ...current, text: modelText, ...typedCaret }
+            : {
               ...current,
               text: modelText,
               selectionStart: Math.max(
@@ -50302,7 +50331,9 @@ export function DocxEditorViewer({
           Number.isInteger(tableIndex) &&
           Number.isInteger(rowIndex) &&
           Number.isInteger(cellIndex) &&
-          focusWrappedParagraphRange(
+          // THUNDER: the latest one — the one closed over reads the model
+          // from before the split, where a cell's new paragraph is missing.
+          focusWrappedParagraphRangeRef.current(
             { kind: "table-cell", tableIndex, rowIndex, cellIndex, paragraphIndex },
             offset
           )
@@ -55853,8 +55884,16 @@ export function DocxEditorViewer({
                   ) {
                     wrappedParagraphTextareaRef.current = element;
                   }
+                  // THUNDER: an inline ref runs on every render, and this put
+                  // the session's selection back each time — the caret went
+                  // behind the first character typed into a table cell
+                  // ("abc" read "bca"). Only a textarea just mounted takes it.
+                  const justMounted = Boolean(element && !element.dataset.thunderMounted);
                   if (element) {
+                    element.dataset.thunderMounted = "true";
                     registeredTextareaElement = element;
+                  }
+                  if (element && justMounted) {
                     // THUNDER: the session moved here from another paragraph,
                     // whose textarea — focused — was just removed; focus fell
                     // to the body, and the first key typed after a click into
@@ -55940,6 +55979,13 @@ export function DocxEditorViewer({
                 // continuation stale — left set, the next cell keystroke
                 // after Enter replaced the paragraph with its old text.
                 editingIntentContinuationRef.current = undefined;
+                // THUNDER: a selection still waiting from the click is stale
+                // once typing starts; applied after the first character it
+                // put the caret back in front of it ("abc" read "bca").
+                if (wrappedParagraphPendingSelectionRef.current?.locationKey === locationKey) {
+                  wrappedParagraphPendingSelectionRef.current = undefined;
+                }
+                wrappedTextareaFocusGenerationRef.current += 1;
                 const input = event.nativeEvent as InputEvent;
                 wrappedParagraphInputHintRef.current = {
                   locationKey,
@@ -63476,14 +63522,15 @@ export function DocxEditorViewer({
                                     pointerHost === pointerTargetElement ||
                                     !pointerTargetElement?.textContent);
                                 if (offText && pointerTargetElement) {
-                                  const cellRoot = event.currentTarget.querySelector<HTMLElement>(
-                                    `[data-docx-cell-key='${cellElementKey}']`
-                                  );
+                                  // This cell's own paragraphs, not a nested table's;
+                                  // a cell drawn as wrapped paragraphs has no
+                                  // contenteditable root to look in.
+                                  const cellTd = event.currentTarget;
                                   const hosts = Array.from(
-                                    cellRoot?.querySelectorAll<HTMLElement>(
-                                      ":scope > [data-docx-table-paragraph-index]"
-                                    ) ?? []
-                                  );
+                                    cellTd.querySelectorAll<HTMLElement>(
+                                      `[data-docx-paragraph-kind='table-cell'][data-docx-table-index='${nodeIndex}'][data-docx-row-index='${rowIndex}'][data-docx-cell-index='${cellIndex}'][data-docx-table-paragraph-index]`
+                                    )
+                                  ).filter((host) => host.closest("td") === cellTd);
                                   const distance = (element: HTMLElement): number => {
                                     const box = element.getBoundingClientRect();
                                     return event.clientY < box.top
