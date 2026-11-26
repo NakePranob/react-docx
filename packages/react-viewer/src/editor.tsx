@@ -29242,7 +29242,10 @@ function normalizeRangeBoundaryParagraphOffset(
   paragraph: ParagraphNode,
   offset: number
 ): number {
-  const length = paragraphText(paragraph).length;
+  // THUNDER: a locked field counts — clamped to the text alone, a range
+  // ending on a field at the end of its line (or on a line that holds only a
+  // field) lost the field, and bold or a size on a selected chip did nothing.
+  const length = editableTextLength(paragraph);
   return Math.max(0, Math.min(Math.max(0, length), Math.round(offset)));
 }
 
@@ -29308,7 +29311,7 @@ function resolveRangeBoundaryOffsetsForParagraph(
     : 0;
   const safeEnd = isEndBoundaryHere
     ? normalizeRangeBoundaryParagraphOffset(paragraph, endBoundary.offset)
-    : paragraphText(paragraph).length;
+    : editableTextLength(paragraph);
 
   return [safeStart, safeEnd];
 }
