@@ -9005,9 +9005,16 @@ function resolveWholeTextLayoutEligibility(
   typography?: DocxTypographyOptions
 ): boolean {
   const style = paragraph.style;
+  // thunder: an empty line has nothing to align — drawn the left-aligned way
+  // it gets a surface to click into; drawn the other way it was a bare span,
+  // and a click on it went to the cell beside it (a row inserted under a
+  // right-aligned row could not be typed in).
+  const emptyLine = paragraph.children.every(
+    (child) => child.type === "text" && child.text === ""
+  );
   if (
     paragraph.children.some((child) => child.type === "text" && child.fieldInstruction !== undefined) ||
-    (style?.align !== undefined && style.align !== "left" &&
+    (!emptyLine && style?.align !== undefined && style.align !== "left" &&
       !(paragraphHasHorizontalCharacterScaling(paragraph) &&
         (style.align === "center" || style.align === "right"))) ||
     ((style?.textAlignment ?? style?.sourceInheritedTextAlignment) !== undefined &&
@@ -25058,16 +25065,37 @@ function paragraphMarkPropertiesFromTemplate(
   };
 }
 
+/** THUNDER: the column boundaries a row has a cell edge on. */
+export function columnEdgesOfRow(
+  table: TableNode,
+  row: TableNode["rows"][number]
+): Set<number> {
+  const edges = new Set<number>();
+  let cursor = tableRowSkippedGridCount(row, "before", table);
+  for (const cell of row.cells) {
+    if (cursor > 0) edges.add(cursor - 1);
+    cursor += cell.style?.gridSpan && cell.style.gridSpan > 1 ? cell.style.gridSpan : 1;
+    edges.add(cursor - 1);
+  }
+  return edges;
+}
+
 function createEmptyParagraphFromTemplate(
   template?: ParagraphNode
 ): ParagraphNode {
   const nextTextStyle = cloneTextStyle(firstRunStyle(template));
+  const mark = paragraphMarkPropertiesFromTemplate(template);
 
   return {
     type: "paragraph",
     blockId: allocateBlockId(),
     style: cloneParagraphStyle(template?.style),
-    ...paragraphMarkPropertiesFromTemplate(template),
+    ...mark,
+    // thunder: an empty paragraph with no mark style is drawn bare, with
+    // nothing to click into — a row inserted under a row whose paragraphs
+    // carry no mark (every row the code-built templates have) could not be
+    // typed in. The mark takes the run's style, as Word gives a new line.
+    paragraphMarkStyle: mark.paragraphMarkStyle ?? { ...(nextTextStyle ?? {}) },
     children: [
       {
         type: "text",
@@ -40198,6 +40226,29 @@ export function DocxEditorViewer({
   >();
   const [activeEmbeddedTableResize, setActiveEmbeddedTableResize] =
     React.useState<{ tableKey: string } | undefined>();
+  // THUNDER: the row under the pointer, so a column handle catches the
+  // pointer only in a row its boundary is an edge of (see columnEdgesOfRow).
+  const [pointerTableRow, setPointerTableRow] = React.useState<
+    { tableIndex: number; rowIndex: number } | undefined
+  >();
+  const trackPointerTableRow = React.useCallback(
+    (clientX: number, clientY: number): void => {
+      const row = document
+        .elementsFromPoint(clientX, clientY)
+        .map((element) => element.closest("tr[data-docx-row-index]"))
+        .find((element): element is HTMLTableRowElement => element !== null);
+      const tableIndex = Number(row?.getAttribute("data-docx-table-index"));
+      const rowIndex = Number(row?.getAttribute("data-docx-row-index"));
+      setPointerTableRow((current) =>
+        !row || !Number.isInteger(tableIndex) || !Number.isInteger(rowIndex)
+          ? current === undefined ? current : undefined
+          : current?.tableIndex === tableIndex && current.rowIndex === rowIndex
+          ? current
+          : { tableIndex, rowIndex }
+      );
+    },
+    []
+  );
   const [hoveredTableResizeHandle, setHoveredTableResizeHandle] =
     React.useState<
       | {
@@ -62829,6 +62880,9 @@ export function DocxEditorViewer({
               ) : null}
               <table
         data-docx-source-id={node.blockId}
+                onPointerMove={(event) =>
+                  trackPointerTableRow(event.clientX, event.clientY)
+                }
                 style={{
                   boxSizing: "border-box",
                   width:
@@ -65112,10 +65166,26 @@ export function DocxEditorViewer({
                         <span data-docx-table-resize-handle="column" data-docx-table-index={nodeIndex}
                           key={`column-border-${nodeIndex}-${boundaryColumnIndex}`}
                           contentEditable={false}
+                          onPointerMove={(event) =>
+                            trackPointerTableRow(event.clientX, event.clientY)
+                          }
                           style={{
                             position: "absolute",
                             top: 0,
                             bottom: 0,
+                            // THUNDER: a boundary that is no edge of the row
+                            // under the pointer — the middle of a merged
+                            // cell — lets the click through to the cell.
+                            pointerEvents:
+                              !isResizing &&
+                              pointerTableRow?.tableIndex === nodeIndex &&
+                              node.rows[pointerTableRow.rowIndex] &&
+                              !columnEdgesOfRow(
+                                node,
+                                node.rows[pointerTableRow.rowIndex]
+                              ).has(boundaryColumnIndex)
+                                ? "none"
+                                : undefined,
                             left: `${
                               leftPx -
                               TABLE_RESIZE_HANDLE_HIT_SIZE / 2 +
