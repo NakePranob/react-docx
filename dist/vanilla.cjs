@@ -29757,7 +29757,10 @@ function paragraphUsesWholeTextPretextLayout(paragraph, typography) {
 }
 function resolveWholeTextLayoutEligibility(paragraph, typography) {
   const style = paragraph.style;
-  if (paragraph.children.some((child) => child.type === "text" && child.fieldInstruction !== void 0) || style?.align !== void 0 && style.align !== "left" && !(paragraphHasHorizontalCharacterScaling(paragraph) && (style.align === "center" || style.align === "right")) || (style?.textAlignment ?? style?.sourceInheritedTextAlignment) !== void 0 && (style?.textAlignment ?? style?.sourceInheritedTextAlignment) !== "auto" || style?.numbering || Object.values(style?.indent ?? {}).some((value) => value !== void 0 && value !== 0) || style?.borders || style?.dropCap || (style?.tabStops?.length ?? 0) > 0 || paragraphHasLegacyFrame(paragraph) || /<w:(?:fldChar|instrText|fldSimple|hyperlink|commentRangeStart|commentRangeEnd|commentReference|ins|del|moveFrom|moveTo|footnoteReference|endnoteReference|sectPr)\b/i.test(
+  const emptyLine = paragraph.children.every(
+    (child) => child.type === "text" && child.text === ""
+  );
+  if (paragraph.children.some((child) => child.type === "text" && child.fieldInstruction !== void 0) || !emptyLine && style?.align !== void 0 && style.align !== "left" && !(paragraphHasHorizontalCharacterScaling(paragraph) && (style.align === "center" || style.align === "right")) || (style?.textAlignment ?? style?.sourceInheritedTextAlignment) !== void 0 && (style?.textAlignment ?? style?.sourceInheritedTextAlignment) !== "auto" || style?.numbering || Object.values(style?.indent ?? {}).some((value) => value !== void 0 && value !== 0) || style?.borders || style?.dropCap || (style?.tabStops?.length ?? 0) > 0 || paragraphHasLegacyFrame(paragraph) || /<w:(?:fldChar|instrText|fldSimple|hyperlink|commentRangeStart|commentRangeEnd|commentReference|ins|del|moveFrom|moveTo|footnoteReference|endnoteReference|sectPr)\b/i.test(
     paragraph.sourceXml ?? ""
   ) || /<w:br\b[^>]*w:type\s*=\s*["'](?:page|column)["']/i.test(
     paragraph.sourceXml ?? ""
@@ -40308,13 +40311,29 @@ function paragraphMarkPropertiesFromTemplate(template, preserveSource = false) {
     paragraphMarkDeleted: preserveSource ? template?.paragraphMarkDeleted : void 0
   };
 }
+function columnEdgesOfRow(table, row) {
+  const edges = /* @__PURE__ */ new Set();
+  let cursor = tableRowSkippedGridCount(row, "before", table);
+  for (const cell of row.cells) {
+    if (cursor > 0) edges.add(cursor - 1);
+    cursor += cell.style?.gridSpan && cell.style.gridSpan > 1 ? cell.style.gridSpan : 1;
+    edges.add(cursor - 1);
+  }
+  return edges;
+}
 function createEmptyParagraphFromTemplate(template) {
   const nextTextStyle = cloneTextStyle4(firstRunStyle(template));
+  const mark = paragraphMarkPropertiesFromTemplate(template);
   return {
     type: "paragraph",
     blockId: allocateBlockId(),
     style: cloneParagraphStyle2(template?.style),
-    ...paragraphMarkPropertiesFromTemplate(template),
+    ...mark,
+    // thunder: an empty paragraph with no mark style is drawn bare, with
+    // nothing to click into — a row inserted under a row whose paragraphs
+    // carry no mark (every row the code-built templates have) could not be
+    // typed in. The mark takes the run's style, as Word gives a new line.
+    paragraphMarkStyle: mark.paragraphMarkStyle ?? { ...nextTextStyle ?? {} },
     children: [
       {
         type: "text",
@@ -50289,6 +50308,18 @@ function DocxEditorViewer({
   const [activeEmbeddedRowResize, setActiveEmbeddedRowResize] = d2();
   const [activeTableResize, setActiveTableResize] = d2();
   const [activeEmbeddedTableResize, setActiveEmbeddedTableResize] = d2();
+  const [pointerTableRow, setPointerTableRow] = d2();
+  const trackPointerTableRow = q2(
+    (clientX, clientY) => {
+      const row = document.elementsFromPoint(clientX, clientY).map((element) => element.closest("tr[data-docx-row-index]")).find((element) => element !== null);
+      const tableIndex = Number(row?.getAttribute("data-docx-table-index"));
+      const rowIndex = Number(row?.getAttribute("data-docx-row-index"));
+      setPointerTableRow(
+        (current) => !row || !Number.isInteger(tableIndex) || !Number.isInteger(rowIndex) ? current === void 0 ? current : void 0 : current?.tableIndex === tableIndex && current.rowIndex === rowIndex ? current : { tableIndex, rowIndex }
+      );
+    },
+    []
+  );
   const [hoveredTableResizeHandle, setHoveredTableResizeHandle] = d2();
   const [hoveredTableHandleTableIndex, setHoveredTableHandleTableIndex] = d2();
   const [
@@ -67588,6 +67619,7 @@ ${currentText.slice(end)}`;
               "table",
               {
                 "data-docx-source-id": node.blockId,
+                onPointerMove: (event) => trackPointerTableRow(event.clientX, event.clientY),
                 style: {
                   boxSizing: "border-box",
                   width: resolvedTableWidthPx > 0 ? `${resolvedTableWidthPx}px` : "100%",
@@ -69280,10 +69312,18 @@ ${currentText.slice(end)}`;
                   "data-docx-table-resize-handle": "column",
                   "data-docx-table-index": nodeIndex,
                   contentEditable: false,
+                  onPointerMove: (event) => trackPointerTableRow(event.clientX, event.clientY),
                   style: {
                     position: "absolute",
                     top: 0,
                     bottom: 0,
+                    // THUNDER: a boundary that is no edge of the row
+                    // under the pointer — the middle of a merged
+                    // cell — lets the click through to the cell.
+                    pointerEvents: !isResizing && pointerTableRow?.tableIndex === nodeIndex && node.rows[pointerTableRow.rowIndex] && !columnEdgesOfRow(
+                      node,
+                      node.rows[pointerTableRow.rowIndex]
+                    ).has(boundaryColumnIndex) ? "none" : void 0,
                     left: `${leftPx - TABLE_RESIZE_HANDLE_HIT_SIZE / 2 + TABLE_RESIZE_HANDLE_ALIGNMENT_OFFSET_PX}px`,
                     width: TABLE_RESIZE_HANDLE_HIT_SIZE,
                     cursor: "col-resize",
