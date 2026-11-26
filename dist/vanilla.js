@@ -41233,7 +41233,7 @@ function paragraphRangeForMutate(model, start, end) {
   return items;
 }
 function normalizeRangeBoundaryParagraphOffset(paragraph, offset) {
-  const length = paragraphText2(paragraph).length;
+  const length = editableTextLength(paragraph);
   return Math.max(0, Math.min(Math.max(0, length), Math.round(offset)));
 }
 function rangeCoversEntireDocument(model, range) {
@@ -41277,7 +41277,7 @@ function resolveRangeBoundaryOffsetsForParagraph(currentLocation, rangeStart, ra
     endBoundary.location
   );
   const safeStart = isStartBoundaryHere ? normalizeRangeBoundaryParagraphOffset(paragraph, startBoundary.offset) : 0;
-  const safeEnd = isEndBoundaryHere ? normalizeRangeBoundaryParagraphOffset(paragraph, endBoundary.offset) : paragraphText2(paragraph).length;
+  const safeEnd = isEndBoundaryHere ? normalizeRangeBoundaryParagraphOffset(paragraph, endBoundary.offset) : editableTextLength(paragraph);
   return [safeStart, safeEnd];
 }
 function cloneTextRangeLocation(location) {
