@@ -44972,8 +44972,10 @@ function useDocxEditor(options = {}) {
       }
       const bytes = new Uint8Array(await file.arrayBuffer());
       const src = `data:${file.type};base64,${toBase64(bytes)}`;
+      const natural = await imageFileSize(file);
       applyModelChange((current) => {
         const next = cloneDocModel(current);
+        const sized = (maxWidthPx) => fitImageSize(natural, maxWidthPx);
         if (selection.kind === "paragraph") {
           const paragraph2 = next.nodes[selection.nodeIndex];
           if (!paragraph2 || paragraph2.type !== "paragraph") {
@@ -44985,7 +44987,7 @@ function useDocxEditor(options = {}) {
             alt: file.name,
             contentType: file.type,
             data: new Uint8Array(bytes),
-            widthPx: 240
+            ...sized(240)
           });
           paragraph2.sourceXml = void 0;
           return next;
@@ -45005,7 +45007,7 @@ function useDocxEditor(options = {}) {
           alt: file.name,
           contentType: file.type,
           data: new Uint8Array(bytes),
-          widthPx: 240
+          ...sized(cellImageMaxWidthPx(table, cell))
         });
         paragraph.sourceXml = void 0;
         table.sourceXml = void 0;
@@ -70876,6 +70878,30 @@ ${currentText.slice(end)}`;
       ]
     }
   );
+}
+async function imageFileSize(file) {
+  try {
+    const bitmap = await createImageBitmap(file);
+    const size = { width: bitmap.width, height: bitmap.height };
+    bitmap.close();
+    return size.width > 0 && size.height > 0 ? size : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function fitImageSize(natural, maxWidthPx) {
+  if (!natural) return { widthPx: Math.min(240, maxWidthPx) };
+  const widthPx = Math.max(1, Math.round(Math.min(natural.width, maxWidthPx)));
+  return { widthPx, heightPx: Math.max(1, Math.round(widthPx * natural.height / natural.width)) };
+}
+function cellImageMaxWidthPx(table, cell) {
+  const t2 = table;
+  const c2 = cell;
+  const widthTwips = c2?.style?.widthTwips;
+  if (!widthTwips) return 240;
+  const margins = c2?.style?.marginTwips ?? t2.style?.cellMarginTwips;
+  const inner = widthTwips - (margins?.leftTwips ?? 108) - (margins?.rightTwips ?? 108);
+  return Math.max(16, Math.min(240, Math.floor(inner / 15)));
 }
 
 // src/vanilla.tsx
