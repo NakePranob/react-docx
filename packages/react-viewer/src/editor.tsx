@@ -34192,9 +34192,14 @@ export function useDocxEditor(
 
       const bytes = new Uint8Array(await file.arrayBuffer());
       const src = `data:${file.type};base64,${toBase64(bytes)}`;
+      // thunder: keep the picture's own shape. A bare 240px width let the
+      // writer fill in a 3:2 height, and a narrow cell then squeezed only
+      // the width — a square logo printed tall.
+      const natural = await imageFileSize(file);
 
       applyModelChange((current) => {
         const next = cloneDocModel(current);
+        const sized = (maxWidthPx: number) => fitImageSize(natural, maxWidthPx);
 
         if (selection.kind === "paragraph") {
           const paragraph = next.nodes[selection.nodeIndex];
@@ -34208,7 +34213,7 @@ export function useDocxEditor(
             alt: file.name,
             contentType: file.type,
             data: new Uint8Array(bytes),
-            widthPx: 240,
+            ...sized(240),
           });
           paragraph.sourceXml = undefined;
           return next;
@@ -34231,7 +34236,7 @@ export function useDocxEditor(
           alt: file.name,
           contentType: file.type,
           data: new Uint8Array(bytes),
-          widthPx: 240,
+          ...sized(cellImageMaxWidthPx(table, cell)),
         });
         paragraph.sourceXml = undefined;
         table.sourceXml = undefined;
@@ -69595,4 +69600,38 @@ export function DocxEditorViewer({
         : null}
     </div>
   );
+}
+
+
+/** thunder: a picture file's pixel size, or undefined when it cannot be read. */
+async function imageFileSize(file: Blob): Promise<{ width: number; height: number } | undefined> {
+  try {
+    const bitmap = await createImageBitmap(file);
+    const size = { width: bitmap.width, height: bitmap.height };
+    bitmap.close();
+    return size.width > 0 && size.height > 0 ? size : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** thunder: the picture's own shape, no wider than `maxWidthPx`. */
+export function fitImageSize(
+  natural: { width: number; height: number } | undefined,
+  maxWidthPx: number,
+): { widthPx: number; heightPx?: number } {
+  if (!natural) return { widthPx: Math.min(240, maxWidthPx) };
+  const widthPx = Math.max(1, Math.round(Math.min(natural.width, maxWidthPx)));
+  return { widthPx, heightPx: Math.max(1, Math.round((widthPx * natural.height) / natural.width)) };
+}
+
+/** thunder: what a cell leaves for a picture — its width less its side margins, capped at 240px. */
+function cellImageMaxWidthPx(table: unknown, cell: unknown): number {
+  const t = table as { style?: { cellMarginTwips?: { leftTwips?: number; rightTwips?: number } } };
+  const c = cell as { style?: { widthTwips?: number; marginTwips?: { leftTwips?: number; rightTwips?: number } } } | undefined;
+  const widthTwips = c?.style?.widthTwips;
+  if (!widthTwips) return 240;
+  const margins = c?.style?.marginTwips ?? t.style?.cellMarginTwips;
+  const inner = widthTwips - (margins?.leftTwips ?? 108) - (margins?.rightTwips ?? 108);
+  return Math.max(16, Math.min(240, Math.floor(inner / 15)));
 }
