@@ -55736,6 +55736,28 @@ export function DocxEditorViewer({
         }}
         onPointerDown={(event) => {
           const target = event.target;
+          // THUNDER: a drag that starts on a field (a template's variable chip)
+          // in a cell still selects cells once it reaches another cell; the
+          // field keeps its own click.
+          if (
+            !isReadOnly &&
+            event.button === 0 &&
+            target instanceof Element &&
+            target.closest("[data-docx-form-field='true']")
+          ) {
+            const fieldCell = parseTableCellLocationFromElement(target);
+            if (fieldCell) {
+              beginTableCellSelectionDrag(
+                event.pointerId,
+                fieldCell,
+                event.clientX,
+                event.clientY,
+                undefined,
+                true
+              );
+            }
+            return;
+          }
           if (
             eventTargetIsInteractiveControl(target) ||
             (target instanceof Element &&
@@ -55750,13 +55772,15 @@ export function DocxEditorViewer({
           }
           event.preventDefault();
           event.stopPropagation();
-          handlePointerSelection(event);
           // THUNDER: a paragraph in a table cell selects its text until the
           // drag reaches another cell, then the cells — as Word does. The
           // cell's own handler never sees this pointerdown (stopped above).
+          // Read before the selection below: it swaps the pressed text for the
+          // typing surface, and the detached target no longer finds its cell.
           const cellLocation = parseTableCellLocationFromElement(
             target instanceof Element ? target : null
           );
+          handlePointerSelection(event);
           if (cellLocation) {
             beginTableCellSelectionDrag(
               event.pointerId,
@@ -55874,6 +55898,23 @@ export function DocxEditorViewer({
           if (tableCellSelectionDragRef.current?.isSelectingCells) {
             return;
           }
+          // THUNDER: …and the move that reaches another cell of the table is
+          // the cell drag's: selecting text across the two cells first cleared
+          // the cell selection it was about to start.
+          const cellDrag = tableCellSelectionDragRef.current;
+          if (cellDrag && cellDrag.pointerId === event.pointerId) {
+            const hovered = parseTableCellLocationFromElement(
+              document.elementFromPoint(event.clientX, event.clientY)
+            );
+            if (
+              hovered &&
+              hovered.tableIndex === cellDrag.anchorCell.tableIndex &&
+              (hovered.rowIndex !== cellDrag.anchorCell.rowIndex ||
+                hovered.cellIndex !== cellDrag.anchorCell.cellIndex)
+            ) {
+              return;
+            }
+          }
           const fallbackBias: "start" | "end" =
             event.clientY < dragState.startY ||
             (event.clientY === dragState.startY &&
@@ -55947,6 +55988,12 @@ export function DocxEditorViewer({
           ) {
             wrappedParagraphSelectionDragRef.current = undefined;
             event.currentTarget.releasePointerCapture(event.pointerId);
+          }
+          // THUNDER: a drag that became a cell selection keeps it — clearing
+          // the selection session here dropped the block just dragged out, so a
+          // drag from a wrapped cell paragraph only ever selected its own cell.
+          if (tableCellSelectionDragRef.current?.isSelectingCells) {
+            return;
           }
           if (
             activeWrappedParagraphSessionRef.current &&
