@@ -23665,6 +23665,28 @@ function scheduleDomWrite(callback) {
   }
   setTimeout(callback, 0);
 }
+function measuredRowHeightsByModelRow(rows, fallback) {
+  const heights = [...fallback];
+  for (const row of rows) {
+    if (row.rowIndex === void 0 || row.rowIndex < 0) continue;
+    while (heights.length <= row.rowIndex) heights.push(24);
+    heights[row.rowIndex] = rows.filter((other) => other.rowIndex === row.rowIndex).reduce((sum, other) => sum + other.heightPx, 0);
+  }
+  return heights;
+}
+function measureTableRowsByModelRow(table, scale, fallback) {
+  return measuredRowHeightsByModelRow(
+    Array.from(table.rows).map((row) => {
+      const index = row.querySelector("[data-docx-row-index]")?.getAttribute("data-docx-row-index");
+      return {
+        rowIndex: index === null || index === void 0 ? void 0 : Number(index),
+        heightPx: normalizeMeasuredTableRowHeightPx(row.getBoundingClientRect().height / scale)
+      };
+    }),
+    fallback
+  );
+}
+var TABLE_ROW_RESIZE_DEAD_ZONE_PX = 3;
 function normalizeMeasuredTableRowHeightPx(heightPx) {
   if (!Number.isFinite(heightPx) || heightPx <= 0) {
     return MIN_PARAGRAPH_LINE_HEIGHT_PX;
@@ -57982,7 +58004,7 @@ function DocxEditorViewer({
       const resizeScale = resizeCapture?.marked ? resolveViewerMeasurementZoomScale(event.currentTarget, 1) : 1;
       if (resizeCapture?.marked) {
         const measuredTable = event.currentTarget.parentElement?.querySelector("table");
-        if (measuredTable) rowHeights = Array.from(measuredTable.rows).map((row) => row.getBoundingClientRect().height / resizeScale);
+        if (measuredTable) rowHeights = measureTableRowsByModelRow(measuredTable, resizeScale, rowHeights);
       }
       const resizeHandle = event.currentTarget;
       const pointerId = event.pointerId;
@@ -58015,8 +58037,11 @@ function DocxEditorViewer({
           [tableIndex]: latestHeights
         }));
       };
+      let moved = false;
       const onPointerMove = (pointerEvent) => {
         if (resizeCapture?.marked && pointerEvent.pointerId !== pointerId) return;
+        if (!moved && Math.abs(pointerEvent.clientY - startY) < TABLE_ROW_RESIZE_DEAD_ZONE_PX) return;
+        moved = true;
         const deltaPx = (pointerEvent.clientY - startY) / scale;
         const nextTop = Math.max(
           minimumHeightPx,
@@ -58263,7 +58288,7 @@ function DocxEditorViewer({
       const resizeScale = resizeCapture?.marked ? resolveViewerMeasurementZoomScale(event.currentTarget, 1) : 1;
       if (resizeCapture?.marked) {
         const measuredTable = event.currentTarget.parentElement?.querySelector("table");
-        if (measuredTable) rowHeights = Array.from(measuredTable.rows).map((row) => row.getBoundingClientRect().height / resizeScale);
+        if (measuredTable) rowHeights = measureTableRowsByModelRow(measuredTable, resizeScale, rowHeights);
       }
       const resizeHandle = event.currentTarget;
       const pointerId = event.pointerId;
@@ -58979,7 +59004,7 @@ function DocxEditorViewer({
       if (resizeCapture?.marked) tableWidthPx /= resizeScale;
       if (resizeCapture?.marked) {
         const measuredTable = event.currentTarget.parentElement?.querySelector("table");
-        if (measuredTable) rowHeights = Array.from(measuredTable.rows).map((row) => row.getBoundingClientRect().height / resizeScale);
+        if (measuredTable) rowHeights = measureTableRowsByModelRow(measuredTable, resizeScale, rowHeights);
       }
       const resizeHandle = event.currentTarget;
       const pointerId = event.pointerId;
@@ -59146,7 +59171,7 @@ function DocxEditorViewer({
       if (resizeCapture?.marked) tableWidthPx /= resizeScale;
       if (resizeCapture?.marked) {
         const measuredTable = event.currentTarget.parentElement?.querySelector("table");
-        if (measuredTable) rowHeights = Array.from(measuredTable.rows).map((row) => row.getBoundingClientRect().height / resizeScale);
+        if (measuredTable) rowHeights = measureTableRowsByModelRow(measuredTable, resizeScale, rowHeights);
       }
       const resizeHandle = event.currentTarget;
       const pointerId = event.pointerId;
@@ -67467,6 +67492,9 @@ ${currentText.slice(end)}`;
                 rowCount: node.rows.length,
                 resolveZoomScale: resolveViewerMeasurementZoomScale,
                 children: ({ heightsPx: rowHandleHeightsPx, bottomsPx }) => bottomsPx.slice(0, -1).map((topPx, boundaryRowIndex) => {
+                  if ((rowHandleHeightsPx[boundaryRowIndex] ?? 24) < 4) {
+                    return null;
+                  }
                   const isResizing = isRowHandleActive && activeRowResize?.boundaryRowIndex === boundaryRowIndex;
                   const isHovered = hoveredTableResizeHandle?.tableIndex === nodeIndex && hoveredTableResizeHandle?.kind === "row" && hoveredTableResizeHandle.boundaryIndex === boundaryRowIndex;
                   const isHot = isResizing || isHovered;
@@ -67553,12 +67581,7 @@ ${currentText.slice(end)}`;
                           "table"
                         );
                         const scale = resolveViewerMeasurementZoomScale(event.currentTarget);
-                        const measuredRows = tableElement ? Array.from(tableElement.rows).map(
-                          (rowElement) => normalizeMeasuredTableRowHeightPx(
-                            rowElement.getBoundingClientRect().height / scale
-                          )
-                        ) : [];
-                        const startingHeights = measuredRows.length > 0 ? measuredRows : rowHandleHeightsPx;
+                        const startingHeights = tableElement ? measureTableRowsByModelRow(tableElement, scale, rowHandleHeightsPx) : rowHandleHeightsPx;
                         beginTableRowResize(
                           event,
                           nodeIndex,
