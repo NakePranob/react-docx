@@ -57464,6 +57464,20 @@ function DocxEditorViewer({
         },
         onPointerDown: (event) => {
           const target = event.target;
+          if (!isReadOnly && event.button === 0 && target instanceof Element && target.closest("[data-docx-form-field='true']")) {
+            const fieldCell = parseTableCellLocationFromElement(target);
+            if (fieldCell) {
+              beginTableCellSelectionDrag(
+                event.pointerId,
+                fieldCell,
+                event.clientX,
+                event.clientY,
+                void 0,
+                true
+              );
+            }
+            return;
+          }
           if (eventTargetIsInteractiveControl(target) || target instanceof Element && target.closest(
             "[data-docx-image-location],[data-docx-drop-cap='true'],[data-docx-table-move-handle='true'],[data-image-resize-handle='true'],[data-docx-form-field='true']"
           )) {
@@ -57474,10 +57488,10 @@ function DocxEditorViewer({
           }
           event.preventDefault();
           event.stopPropagation();
-          handlePointerSelection(event);
           const cellLocation = parseTableCellLocationFromElement(
             target instanceof Element ? target : null
           );
+          handlePointerSelection(event);
           if (cellLocation) {
             beginTableCellSelectionDrag(
               event.pointerId,
@@ -57568,6 +57582,15 @@ function DocxEditorViewer({
           if (tableCellSelectionDragRef.current?.isSelectingCells) {
             return;
           }
+          const cellDrag = tableCellSelectionDragRef.current;
+          if (cellDrag && cellDrag.pointerId === event.pointerId) {
+            const hovered = parseTableCellLocationFromElement(
+              document.elementFromPoint(event.clientX, event.clientY)
+            );
+            if (hovered && hovered.tableIndex === cellDrag.anchorCell.tableIndex && (hovered.rowIndex !== cellDrag.anchorCell.rowIndex || hovered.cellIndex !== cellDrag.anchorCell.cellIndex)) {
+              return;
+            }
+          }
           const fallbackBias = event.clientY < dragState.startY || event.clientY === dragState.startY && event.clientX < dragState.startX ? "start" : "end";
           const endBoundary = resolveBoundaryFromPoint(
             {
@@ -57619,6 +57642,9 @@ function DocxEditorViewer({
           if (wrappedParagraphSelectionDragRef.current?.pointerId === event.pointerId) {
             wrappedParagraphSelectionDragRef.current = void 0;
             event.currentTarget.releasePointerCapture(event.pointerId);
+          }
+          if (tableCellSelectionDragRef.current?.isSelectingCells) {
+            return;
           }
           if (activeWrappedParagraphSessionRef.current && activeWrappedParagraphSessionRef.current.locationKey === locationKey) {
             focusWrappedParagraphTextarea();
