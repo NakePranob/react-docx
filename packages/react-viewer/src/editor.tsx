@@ -1159,6 +1159,42 @@ function scheduleDomWrite(callback: () => void): void {
   setTimeout(callback, 0);
 }
 
+/**
+ * THUNDER: a table's rendered row heights, by the model row each <tr> draws
+ * (its cells' data-docx-row-index), not by DOM order. A row a condition hides
+ * in the case view is not drawn, so DOM order put the next row's height under
+ * this one's index, and a resize started from the wrong height.
+ */
+export function measuredRowHeightsByModelRow(
+  rows: readonly { rowIndex: number | undefined; heightPx: number }[],
+  fallback: readonly number[]
+): number[] {
+  const heights = [...fallback];
+  for (const row of rows) {
+    if (row.rowIndex === undefined || row.rowIndex < 0) continue;
+    while (heights.length <= row.rowIndex) heights.push(24);
+    // A row sliced across a page is drawn twice; its height is both parts.
+    heights[row.rowIndex] = rows.filter((other) => other.rowIndex === row.rowIndex).reduce((sum, other) => sum + other.heightPx, 0);
+  }
+  return heights;
+}
+
+function measureTableRowsByModelRow(table: HTMLTableElement, scale: number, fallback: readonly number[]): number[] {
+  return measuredRowHeightsByModelRow(
+    Array.from(table.rows).map((row) => {
+      const index = row.querySelector("[data-docx-row-index]")?.getAttribute("data-docx-row-index");
+      return {
+        rowIndex: index === null || index === undefined ? undefined : Number(index),
+        heightPx: normalizeMeasuredTableRowHeightPx(row.getBoundingClientRect().height / scale),
+      };
+    }),
+    fallback
+  );
+}
+
+/** THUNDER: a press on a row border that moves less than this is a click, not a resize. */
+const TABLE_ROW_RESIZE_DEAD_ZONE_PX = 3;
+
 function normalizeMeasuredTableRowHeightPx(heightPx: number): number {
   if (!Number.isFinite(heightPx) || heightPx <= 0) {
     return MIN_PARAGRAPH_LINE_HEIGHT_PX;
@@ -53190,7 +53226,7 @@ export function DocxEditorViewer({
       const resizeScale = resizeCapture?.marked ? resolveViewerMeasurementZoomScale(event.currentTarget, 1) : 1;
       if (resizeCapture?.marked) {
         const measuredTable = event.currentTarget.parentElement?.querySelector<HTMLTableElement>("table");
-        if (measuredTable) rowHeights = Array.from(measuredTable.rows).map((row) => row.getBoundingClientRect().height / resizeScale);
+        if (measuredTable) rowHeights = measureTableRowsByModelRow(measuredTable, resizeScale, rowHeights);
       }
 
       const resizeHandle = event.currentTarget;
@@ -53235,8 +53271,11 @@ export function DocxEditorViewer({
         }));
       };
 
+      let moved = false;
       const onPointerMove = (pointerEvent: PointerEvent): void => {
         if (resizeCapture?.marked && pointerEvent.pointerId !== pointerId) return;
+        if (!moved && Math.abs(pointerEvent.clientY - startY) < TABLE_ROW_RESIZE_DEAD_ZONE_PX) return;
+        moved = true;
         const deltaPx = (pointerEvent.clientY - startY) / scale;
         const nextTop = Math.max(
           minimumHeightPx,
@@ -53522,7 +53561,7 @@ export function DocxEditorViewer({
       const resizeScale = resizeCapture?.marked ? resolveViewerMeasurementZoomScale(event.currentTarget, 1) : 1;
       if (resizeCapture?.marked) {
         const measuredTable = event.currentTarget.parentElement?.querySelector<HTMLTableElement>("table");
-        if (measuredTable) rowHeights = Array.from(measuredTable.rows).map((row) => row.getBoundingClientRect().height / resizeScale);
+        if (measuredTable) rowHeights = measureTableRowsByModelRow(measuredTable, resizeScale, rowHeights);
       }
 
       const resizeHandle = event.currentTarget;
@@ -54454,7 +54493,7 @@ export function DocxEditorViewer({
       if (resizeCapture?.marked) tableWidthPx /= resizeScale;
       if (resizeCapture?.marked) {
         const measuredTable = event.currentTarget.parentElement?.querySelector<HTMLTableElement>("table");
-        if (measuredTable) rowHeights = Array.from(measuredTable.rows).map((row) => row.getBoundingClientRect().height / resizeScale);
+        if (measuredTable) rowHeights = measureTableRowsByModelRow(measuredTable, resizeScale, rowHeights);
       }
 
       const resizeHandle = event.currentTarget;
@@ -54647,7 +54686,7 @@ export function DocxEditorViewer({
       if (resizeCapture?.marked) tableWidthPx /= resizeScale;
       if (resizeCapture?.marked) {
         const measuredTable = event.currentTarget.parentElement?.querySelector<HTMLTableElement>("table");
-        if (measuredTable) rowHeights = Array.from(measuredTable.rows).map((row) => row.getBoundingClientRect().height / resizeScale);
+        if (measuredTable) rowHeights = measureTableRowsByModelRow(measuredTable, resizeScale, rowHeights);
       }
 
       const resizeHandle = event.currentTarget;
@@ -65382,6 +65421,13 @@ export function DocxEditorViewer({
                 >
                   {({ heightsPx: rowHandleHeightsPx, bottomsPx }) =>
                     bottomsPx.slice(0, -1).map((topPx, boundaryRowIndex) => {
+                      // THUNDER: a row drawn collapsed (a case view hiding it)
+                      // gets no handle: its line lies on the row above's, the
+                      // later handle won, and dragging that visible line
+                      // gave the hidden row a height.
+                      if ((rowHandleHeightsPx[boundaryRowIndex] ?? 24) < 4) {
+                        return null;
+                      }
                       const isResizing =
                         isRowHandleActive &&
                         activeRowResize?.boundaryRowIndex === boundaryRowIndex;
@@ -65502,19 +65548,9 @@ export function DocxEditorViewer({
                                 "table"
                               );
                             const scale = resolveViewerMeasurementZoomScale(event.currentTarget);
-                            const measuredRows = tableElement
-                              ? Array.from(tableElement.rows).map((rowElement) =>
-                                  normalizeMeasuredTableRowHeightPx(
-                                    (
-                                      rowElement as HTMLTableRowElement
-                                    ).getBoundingClientRect().height / scale
-                                  )
-                                )
-                              : [];
-                            const startingHeights =
-                              measuredRows.length > 0
-                                ? measuredRows
-                                : rowHandleHeightsPx;
+                            const startingHeights = tableElement
+                              ? measureTableRowsByModelRow(tableElement, scale, rowHandleHeightsPx)
+                              : rowHandleHeightsPx;
                             beginTableRowResize(
                               event,
                               nodeIndex,
