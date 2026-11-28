@@ -10691,6 +10691,51 @@ function nodeReferencedNoteIds(
   return references;
 }
 
+/**
+ * THUNDER: the whole document as a text range, from the model: the start of
+ * its first paragraph to the end of its last, table cells included.
+ */
+export function wholeDocumentRange(model: DocModel): DocxTextRange | undefined {
+  const first = firstParagraphLocationInDocument(model);
+  const last = lastParagraphLocationInDocument(model);
+  const lastParagraph = last
+    ? getParagraphAtLocation(model, last).paragraph
+    : undefined;
+  if (!first || !last || !lastParagraph) {
+    return undefined;
+  }
+  return {
+    start: { location: cloneTextRangeLocation(first), offset: 0 },
+    end: {
+      location: cloneTextRangeLocation(last),
+      offset: paragraphText(lastParagraph).length,
+    },
+  };
+}
+
+/**
+ * THUNDER: Ctrl+Home / Ctrl+End, and Cmd+Up / Cmd+Down on a Mac — the start or
+ * end of the document. With Shift or Alt it is not this.
+ */
+export function documentEdgeForKey(event: {
+  key: string;
+  ctrlKey: boolean;
+  metaKey: boolean;
+  shiftKey: boolean;
+  altKey: boolean;
+}): "start" | "end" | undefined {
+  if (event.shiftKey || event.altKey) return undefined;
+  if (event.ctrlKey || event.metaKey) {
+    if (event.key === "Home") return "start";
+    if (event.key === "End") return "end";
+  }
+  if (event.metaKey && !event.ctrlKey) {
+    if (event.key === "ArrowUp") return "start";
+    if (event.key === "ArrowDown") return "end";
+  }
+  return undefined;
+}
+
 function eventTargetIsInteractiveControl(target: EventTarget | null): boolean {
   if (!(target instanceof Element)) {
     return false;
@@ -39936,6 +39981,10 @@ export function DocxEditorViewer({
   // programmatic range in a synchronous guard long enough for React to commit
   // and for the replacement DOM to receive that range; otherwise a delayed
   // event can write the pre-command selection back into editor state.
+  // THUNDER: set once goToDocumentEdge exists; the key handlers come first.
+  const goToDocumentEdgeRef = React.useRef<
+    ((edge: "start" | "end") => void) | undefined
+  >(undefined);
   const commandSelectionGuardRef = React.useRef<
     | {
         range: DocxTextRange;
@@ -46428,43 +46477,66 @@ export function DocxEditorViewer({
   );
 
   const selectAllDocumentText = React.useCallback((): void => {
-    const rootElement = viewerRootRef.current;
-    if (!rootElement) {
+    // thunder: the range is the document's, from the model. The drawn hosts
+    // are only the pages virtualization has put on screen, and an empty last
+    // line has no DOM point, so a range built from them collapsed to a caret.
+    const range = wholeDocumentRange(editor.model);
+    if (!range) {
       return;
     }
 
     clearTableCellSelection();
+    setActiveWrappedParagraphSession(undefined);
+    viewerRootRef.current?.focus({ preventScroll: true });
 
-    const paragraphHosts = Array.from(
-      rootElement.querySelectorAll<HTMLElement>(
-        "[data-docx-paragraph-host='true'],[data-docx-wrapped-paragraph-root='true'][data-docx-wrapped-paragraph-location-key]"
-      )
-    );
-    if (paragraphHosts.length === 0) {
-      return;
-    }
-
-    const firstHost = paragraphHosts[0];
-    const lastHost = paragraphHosts[paragraphHosts.length - 1];
-    const firstLocation = parseParagraphLocationFromElement(firstHost);
-    const lastLocation = parseParagraphLocationFromElement(lastHost);
-    if (!firstLocation || !lastLocation) {
-      return;
-    }
-
-    const startBoundary: DocxTextRangeBoundary = {
-      location: firstLocation,
-      offset: 0,
+    // What can be highlighted: from the first to the last drawn line that has
+    // a DOM point. The model range stays whole.
+    const rootElement = viewerRootRef.current;
+    const hosts = rootElement
+      ? Array.from(
+          rootElement.querySelectorAll<HTMLElement>(
+            "[data-docx-paragraph-host='true'],[data-docx-wrapped-paragraph-root='true'][data-docx-wrapped-paragraph-location-key]"
+          )
+        )
+      : [];
+    const drawn = (host: HTMLElement, atEnd: boolean) => {
+      const location = parseParagraphLocationFromElement(host);
+      if (!location) {
+        return undefined;
+      }
+      const boundary: DocxTextRangeBoundary = {
+        location,
+        offset: atEnd ? paragraphTextLengthFromElement(host) : 0,
+      };
+      return resolveDomPositionFromBoundary(boundary) ? boundary : undefined;
     };
-    const endBoundary: DocxTextRangeBoundary = {
-      location: lastLocation,
-      offset: paragraphTextLengthFromElement(lastHost),
+    let drawnStart: DocxTextRangeBoundary | undefined;
+    for (const host of hosts) {
+      drawnStart = drawn(host, false);
+      if (drawnStart) break;
+    }
+    let drawnEnd: DocxTextRangeBoundary | undefined;
+    for (let index = hosts.length - 1; index >= 0; index -= 1) {
+      drawnEnd = drawn(hosts[index], true);
+      if (drawnEnd) break;
+    }
+    if (drawnStart && drawnEnd) {
+      setSelectionFromDocxBoundaries(drawnStart, drawnEnd);
+    }
+    // A selectionchange from that highlight must not shrink the range to it.
+    commandSelectionGuardRef.current = {
+      range: {
+        start: { ...range.start, location: cloneTextRangeLocation(range.start.location) },
+        end: { ...range.end, location: cloneTextRangeLocation(range.end.location) },
+      },
+      expiresAt: Date.now() + 500,
     };
-
-    setSelectionFromDocxBoundaries(startBoundary, endBoundary);
+    editor.setActiveTextRange(range);
   }, [
     clearTableCellSelection,
+    editor,
     paragraphTextLengthFromElement,
+    resolveDomPositionFromBoundary,
     setSelectionFromDocxBoundaries,
   ]);
 
@@ -49124,6 +49196,13 @@ export function DocxEditorViewer({
   const onViewerKeyDown = React.useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>): void => {
       commandSelectionGuardRef.current = undefined;
+      const documentEdge = documentEdgeForKey(event);
+      if (documentEdge && !eventTargetIsInteractiveControl(event.target)) {
+        event.preventDefault();
+        event.stopPropagation();
+        goToDocumentEdgeRef.current?.(documentEdge);
+        return;
+      }
       const replacementText =
         event.key.length === 1
           ? event.key
@@ -50624,6 +50703,58 @@ export function DocxEditorViewer({
     },
     [focusParagraphAtOffset, focusTableCellParagraphAtOffset]
   );
+
+  // THUNDER: the first or last paragraph of the document, from the model. Its
+  // page may not be drawn (virtualization): reveal the page, and the focus
+  // below waits for the paragraph to be drawn before it puts the caret in.
+  const goToDocumentEdge = React.useCallback(
+    (edge: "start" | "end"): void => {
+      const model = editor.model;
+      const location =
+        edge === "start"
+          ? firstParagraphLocationInDocument(model)
+          : lastParagraphLocationInDocument(model);
+      if (!location) {
+        return;
+      }
+      const offset =
+        edge === "start"
+          ? 0
+          : (() => {
+              const paragraph = getParagraphAtLocation(model, location).paragraph;
+              return paragraph ? paragraphText(paragraph).length : 0;
+            })();
+      clearTableCellSelection();
+      setActiveWrappedParagraphSession(undefined);
+      requestPageReveal(edge === "start" ? 0 : Number.MAX_SAFE_INTEGER);
+      editor.setActiveTextRange({
+        start: { location: cloneTextRangeLocation(location), offset },
+        end: { location: cloneTextRangeLocation(location), offset },
+      });
+      focusParagraphLocationAtOffset(location, offset);
+      // Without virtualization nothing scrolled: bring the line into view once
+      // it is there.
+      const reveal = (frames: number): void => {
+        const element = resolveParagraphHostElement(location);
+        if (element?.isConnected) {
+          element.scrollIntoView({ block: "nearest" });
+          return;
+        }
+        if (frames > 0) {
+          window.requestAnimationFrame(() => reveal(frames - 1));
+        }
+      };
+      window.requestAnimationFrame(() => reveal(30));
+    },
+    [
+      clearTableCellSelection,
+      editor,
+      focusParagraphLocationAtOffset,
+      requestPageReveal,
+      resolveParagraphHostElement,
+    ]
+  );
+  goToDocumentEdgeRef.current = goToDocumentEdge;
 
   // THUNDER: Backspace or Delete in an empty body paragraph beside a table
   // takes the paragraph out — there is no text to join it to, so the keys
@@ -56457,6 +56588,15 @@ export function DocxEditorViewer({
                 if (handleEditorHistoryShortcut(event, () => {})) {
                   return;
                 }
+                {
+                  const documentEdge = documentEdgeForKey(event);
+                  if (documentEdge) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    goToDocumentEdgeRef.current?.(documentEdge);
+                    return;
+                  }
+                }
                 if (
                   (event.metaKey || event.ctrlKey) &&
                   event.key.toLowerCase() === "a" &&
@@ -56464,28 +56604,7 @@ export function DocxEditorViewer({
                   !event.altKey
                 ) {
                   event.preventDefault();
-                  const first = firstParagraphLocationInDocument(editor.model);
-                  const last = lastParagraphLocationInDocument(editor.model);
-                  const lastParagraph = last
-                    ? getParagraphAtLocation(editor.model, last).paragraph
-                    : undefined;
-                  if (first && last && lastParagraph) {
-                    const range: DocxTextRange = {
-                      start: { location: cloneTextRangeLocation(first), offset: 0 },
-                      end: {
-                        location: cloneTextRangeLocation(last),
-                        offset: paragraphText(lastParagraph).length,
-                      },
-                    };
-                    setActiveWrappedParagraphSession(undefined);
-                    clearTableCellSelection();
-                    viewerRootRef.current?.focus({ preventScroll: true });
-                    editor.setActiveTextRange(range);
-                    window.requestAnimationFrame(() => {
-                      setSelectionFromDocxBoundaries(range.start, range.end);
-                      editor.setActiveTextRange(range);
-                    });
-                  }
+                  selectAllDocumentText();
                   return;
                 }
                 editor.beginSelectionSession("keyboard", {
