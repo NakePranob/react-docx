@@ -3944,6 +3944,36 @@ function tableCellInColumn(
   return undefined;
 }
 
+/**
+ * THUNDER: a column border's grab zone, narrowed beside a narrow column so at
+ * least 8px of it stays the column's: 16px across a 10px column covered it
+ * from edge to edge, and a click meant for the cell, or a drag started in it,
+ * moved the border instead (a merge started there resized the column).
+ */
+export function columnHandleHitSizePx(leftWidthPx?: number, rightWidthPx?: number): number {
+  const narrowest = Math.min(leftWidthPx ?? Infinity, rightWidthPx ?? Infinity);
+  if (!Number.isFinite(narrowest) || narrowest >= 24) return TABLE_RESIZE_HANDLE_HIT_SIZE;
+  return Math.max(4, Math.min(TABLE_RESIZE_HANDLE_HIT_SIZE, Math.floor(narrowest - 8)));
+}
+
+/**
+ * THUNDER: the cell under a point, looking past what is laid over the cells.
+ * A column narrower than the 16px column-resize handles is covered by them
+ * from edge to edge; the topmost element there was a handle, so a drag that
+ * ended in that column selected up to the column before it and a merge came
+ * out one column short.
+ */
+export function firstTableCellLocationAt(
+  elements: readonly Element[]
+): DocxTableCellLocation | undefined {
+  for (const element of elements) {
+    if (element.closest("[data-docx-table-resize-handle]")) continue;
+    const location = parseTableCellLocationFromElement(element);
+    if (location) return location;
+  }
+  return undefined;
+}
+
 function parseTableCellLocationFromElement(
   element: Element | null
 ): DocxTableCellLocation | undefined {
@@ -48302,10 +48332,8 @@ export function DocxEditorViewer({
   );
 
   const resolveTableCellLocationFromPoint = React.useCallback(
-    (point: { x: number; y: number }): DocxTableCellLocation | undefined => {
-      const element = document.elementFromPoint(point.x, point.y);
-      return parseTableCellLocationFromElement(element);
-    },
+    (point: { x: number; y: number }): DocxTableCellLocation | undefined =>
+      firstTableCellLocationAt(document.elementsFromPoint(point.x, point.y)),
     []
   );
 
@@ -65245,6 +65273,10 @@ export function DocxEditorViewer({
 
                       const leftPx =
                         tableColumnBoundaryOffsetsPx[boundaryColumnIndex] ?? 0;
+                      const hitSizePx = columnHandleHitSizePx(
+                        columnWidthsPx[boundaryColumnIndex],
+                        columnWidthsPx[boundaryColumnIndex + 1]
+                      );
                       const isResizing =
                         isColumnHandleActive &&
                         activeColumnResize?.boundaryColumnIndex ===
@@ -65282,10 +65314,10 @@ export function DocxEditorViewer({
                                 : undefined,
                             left: `${
                               leftPx -
-                              TABLE_RESIZE_HANDLE_HIT_SIZE / 2 +
+                              hitSizePx / 2 +
                               TABLE_RESIZE_HANDLE_ALIGNMENT_OFFSET_PX
                             }px`,
-                            width: TABLE_RESIZE_HANDLE_HIT_SIZE,
+                            width: hitSizePx,
                             cursor: "col-resize",
                             zIndex: 5,
                             touchAction: "none",
