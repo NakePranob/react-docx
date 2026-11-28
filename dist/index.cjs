@@ -26587,6 +26587,33 @@ function nodeReferencedNoteIds(node, noteType, tableRowRange, paragraphLineRange
   }
   return references;
 }
+function wholeDocumentRange(model) {
+  const first = firstParagraphLocationInDocument(model);
+  const last = lastParagraphLocationInDocument(model);
+  const lastParagraph = last ? getParagraphAtLocation(model, last).paragraph : void 0;
+  if (!first || !last || !lastParagraph) {
+    return void 0;
+  }
+  return {
+    start: { location: cloneTextRangeLocation(first), offset: 0 },
+    end: {
+      location: cloneTextRangeLocation(last),
+      offset: paragraphText2(lastParagraph).length
+    }
+  };
+}
+function documentEdgeForKey(event) {
+  if (event.shiftKey || event.altKey) return void 0;
+  if (event.ctrlKey || event.metaKey) {
+    if (event.key === "Home") return "start";
+    if (event.key === "End") return "end";
+  }
+  if (event.metaKey && !event.ctrlKey) {
+    if (event.key === "ArrowUp") return "start";
+    if (event.key === "ArrowDown") return "end";
+  }
+  return void 0;
+}
 function eventTargetIsInteractiveControl(target) {
   if (!(target instanceof Element)) {
     return false;
@@ -47104,6 +47131,7 @@ function DocxEditorViewer({
   const activeRangeFlushFrameRef = React9.useRef(null);
   const pendingEditableCaretRef = React9.useRef(null);
   const pendingRootCaretFocusRef = React9.useRef(void 0);
+  const goToDocumentEdgeRef = React9.useRef(void 0);
   const commandSelectionGuardRef = React9.useRef(void 0);
   const editingIntentContinuationRef = React9.useRef(void 0);
   const compositionActiveRef = React9.useRef(false);
@@ -51895,38 +51923,56 @@ function DocxEditorViewer({
     [resolveViewerMeasurementZoomScale]
   );
   const selectAllDocumentText = React9.useCallback(() => {
-    const rootElement = viewerRootRef.current;
-    if (!rootElement) {
+    const range = wholeDocumentRange(editor.model);
+    if (!range) {
       return;
     }
     clearTableCellSelection();
-    const paragraphHosts = Array.from(
+    setActiveWrappedParagraphSession(void 0);
+    viewerRootRef.current?.focus({ preventScroll: true });
+    const rootElement = viewerRootRef.current;
+    const hosts = rootElement ? Array.from(
       rootElement.querySelectorAll(
         "[data-docx-paragraph-host='true'],[data-docx-wrapped-paragraph-root='true'][data-docx-wrapped-paragraph-location-key]"
       )
-    );
-    if (paragraphHosts.length === 0) {
-      return;
-    }
-    const firstHost = paragraphHosts[0];
-    const lastHost = paragraphHosts[paragraphHosts.length - 1];
-    const firstLocation = parseParagraphLocationFromElement(firstHost);
-    const lastLocation = parseParagraphLocationFromElement(lastHost);
-    if (!firstLocation || !lastLocation) {
-      return;
-    }
-    const startBoundary = {
-      location: firstLocation,
-      offset: 0
+    ) : [];
+    const drawn = (host, atEnd) => {
+      const location = parseParagraphLocationFromElement(host);
+      if (!location) {
+        return void 0;
+      }
+      const boundary = {
+        location,
+        offset: atEnd ? paragraphTextLengthFromElement(host) : 0
+      };
+      return resolveDomPositionFromBoundary(boundary) ? boundary : void 0;
     };
-    const endBoundary = {
-      location: lastLocation,
-      offset: paragraphTextLengthFromElement(lastHost)
+    let drawnStart;
+    for (const host of hosts) {
+      drawnStart = drawn(host, false);
+      if (drawnStart) break;
+    }
+    let drawnEnd;
+    for (let index = hosts.length - 1; index >= 0; index -= 1) {
+      drawnEnd = drawn(hosts[index], true);
+      if (drawnEnd) break;
+    }
+    if (drawnStart && drawnEnd) {
+      setSelectionFromDocxBoundaries(drawnStart, drawnEnd);
+    }
+    commandSelectionGuardRef.current = {
+      range: {
+        start: { ...range.start, location: cloneTextRangeLocation(range.start.location) },
+        end: { ...range.end, location: cloneTextRangeLocation(range.end.location) }
+      },
+      expiresAt: Date.now() + 500
     };
-    setSelectionFromDocxBoundaries(startBoundary, endBoundary);
+    editor.setActiveTextRange(range);
   }, [
     clearTableCellSelection,
+    editor,
     paragraphTextLengthFromElement,
+    resolveDomPositionFromBoundary,
     setSelectionFromDocxBoundaries
   ]);
   const resolveParagraphBoundaryFromSelectionPoint = React9.useCallback(
@@ -53820,6 +53866,13 @@ function DocxEditorViewer({
   const onViewerKeyDown = React9.useCallback(
     (event) => {
       commandSelectionGuardRef.current = void 0;
+      const documentEdge = documentEdgeForKey(event);
+      if (documentEdge && !eventTargetIsInteractiveControl(event.target)) {
+        event.preventDefault();
+        event.stopPropagation();
+        goToDocumentEdgeRef.current?.(documentEdge);
+        return;
+      }
       const replacementText = event.key.length === 1 ? event.key : event.key === "Enter" && event.shiftKey ? "\n" : void 0;
       if (!isReadOnly && !event.defaultPrevented && !event.metaKey && !event.ctrlKey && !event.altKey && !isCompositionKeyboardEvent(event) && !compositionActiveRef.current && event.target === event.currentTarget && replacementText !== void 0 && replaceExpandedSelectionWithText(replacementText)) {
         cancelPendingPointerSelectionReconcile();
@@ -54963,6 +55016,46 @@ function DocxEditorViewer({
     },
     [focusParagraphAtOffset, focusTableCellParagraphAtOffset]
   );
+  const goToDocumentEdge = React9.useCallback(
+    (edge) => {
+      const model = editor.model;
+      const location = edge === "start" ? firstParagraphLocationInDocument(model) : lastParagraphLocationInDocument(model);
+      if (!location) {
+        return;
+      }
+      const offset = edge === "start" ? 0 : (() => {
+        const paragraph = getParagraphAtLocation(model, location).paragraph;
+        return paragraph ? paragraphText2(paragraph).length : 0;
+      })();
+      clearTableCellSelection();
+      setActiveWrappedParagraphSession(void 0);
+      requestPageReveal(edge === "start" ? 0 : Number.MAX_SAFE_INTEGER);
+      editor.setActiveTextRange({
+        start: { location: cloneTextRangeLocation(location), offset },
+        end: { location: cloneTextRangeLocation(location), offset }
+      });
+      focusParagraphLocationAtOffset(location, offset);
+      const reveal = (frames) => {
+        const element = resolveParagraphHostElement(location);
+        if (element?.isConnected) {
+          element.scrollIntoView({ block: "nearest" });
+          return;
+        }
+        if (frames > 0) {
+          window.requestAnimationFrame(() => reveal(frames - 1));
+        }
+      };
+      window.requestAnimationFrame(() => reveal(30));
+    },
+    [
+      clearTableCellSelection,
+      editor,
+      focusParagraphLocationAtOffset,
+      requestPageReveal,
+      resolveParagraphHostElement
+    ]
+  );
+  goToDocumentEdgeRef.current = goToDocumentEdge;
   const removeEmptyParagraphBesideTable = React9.useCallback(
     (nodeIndex) => {
       const nodes = editor.model.nodes;
@@ -59520,28 +59613,18 @@ function DocxEditorViewer({
                       })) {
                         return;
                       }
+                      {
+                        const documentEdge = documentEdgeForKey(event);
+                        if (documentEdge) {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          goToDocumentEdgeRef.current?.(documentEdge);
+                          return;
+                        }
+                      }
                       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a" && !event.shiftKey && !event.altKey) {
                         event.preventDefault();
-                        const first = firstParagraphLocationInDocument(editor.model);
-                        const last = lastParagraphLocationInDocument(editor.model);
-                        const lastParagraph = last ? getParagraphAtLocation(editor.model, last).paragraph : void 0;
-                        if (first && last && lastParagraph) {
-                          const range = {
-                            start: { location: cloneTextRangeLocation(first), offset: 0 },
-                            end: {
-                              location: cloneTextRangeLocation(last),
-                              offset: paragraphText2(lastParagraph).length
-                            }
-                          };
-                          setActiveWrappedParagraphSession(void 0);
-                          clearTableCellSelection();
-                          viewerRootRef.current?.focus({ preventScroll: true });
-                          editor.setActiveTextRange(range);
-                          window.requestAnimationFrame(() => {
-                            setSelectionFromDocxBoundaries(range.start, range.end);
-                            editor.setActiveTextRange(range);
-                          });
-                        }
+                        selectAllDocumentText();
                         return;
                       }
                       editor.beginSelectionSession("keyboard", {
