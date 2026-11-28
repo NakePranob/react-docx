@@ -27389,6 +27389,19 @@ function tableCellInColumn(table, rowIndex, cellIndex, step) {
   }
   return void 0;
 }
+function columnHandleHitSizePx(leftWidthPx, rightWidthPx) {
+  const narrowest = Math.min(leftWidthPx ?? Infinity, rightWidthPx ?? Infinity);
+  if (!Number.isFinite(narrowest) || narrowest >= 24) return TABLE_RESIZE_HANDLE_HIT_SIZE;
+  return Math.max(4, Math.min(TABLE_RESIZE_HANDLE_HIT_SIZE, Math.floor(narrowest - 8)));
+}
+function firstTableCellLocationAt(elements) {
+  for (const element of elements) {
+    if (element.closest("[data-docx-table-resize-handle]")) continue;
+    const location = parseTableCellLocationFromElement(element);
+    if (location) return location;
+  }
+  return void 0;
+}
 function parseTableCellLocationFromElement(element) {
   if (!element) {
     return void 0;
@@ -56229,10 +56242,7 @@ function DocxEditorViewer({
     [resolveBoundaryFromPoint, setSelectionFromDocxBoundaries]
   );
   const resolveTableCellLocationFromPoint = q2(
-    (point) => {
-      const element = document.elementFromPoint(point.x, point.y);
-      return parseTableCellLocationFromElement(element);
-    },
+    (point) => firstTableCellLocationAt(document.elementsFromPoint(point.x, point.y)),
     []
   );
   const beginTableCellSelectionDrag = q2(
@@ -69356,6 +69366,10 @@ ${currentText.slice(end)}`;
                 return null;
               }
               const leftPx = tableColumnBoundaryOffsetsPx[boundaryColumnIndex] ?? 0;
+              const hitSizePx = columnHandleHitSizePx(
+                columnWidthsPx[boundaryColumnIndex],
+                columnWidthsPx[boundaryColumnIndex + 1]
+              );
               const isResizing = isColumnHandleActive && activeColumnResize?.boundaryColumnIndex === boundaryColumnIndex;
               const isHovered = hoveredTableResizeHandle?.tableIndex === nodeIndex && hoveredTableResizeHandle?.kind === "column" && hoveredTableResizeHandle.boundaryIndex === boundaryColumnIndex;
               const isHot = isResizing || isHovered;
@@ -69377,8 +69391,8 @@ ${currentText.slice(end)}`;
                       node,
                       node.rows[pointerTableRow.rowIndex]
                     ).has(boundaryColumnIndex) ? "none" : void 0,
-                    left: `${leftPx - TABLE_RESIZE_HANDLE_HIT_SIZE / 2 + TABLE_RESIZE_HANDLE_ALIGNMENT_OFFSET_PX}px`,
-                    width: TABLE_RESIZE_HANDLE_HIT_SIZE,
+                    left: `${leftPx - hitSizePx / 2 + TABLE_RESIZE_HANDLE_ALIGNMENT_OFFSET_PX}px`,
+                    width: hitSizePx,
                     cursor: "col-resize",
                     zIndex: 5,
                     touchAction: "none",
